@@ -2,9 +2,10 @@ import { and, desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agents, conversations, messages } from '../db/schema'
 import { embedOne } from '../lib/embeddings'
-import type { ChatMessage, Provider } from '../lib/llm'
+import type { ChatMessage, LlmConfig } from '../lib/llm'
 import { searchChunks } from './retrieve'
 import { recallMemories } from './memory'
+import { resolveLlmConfig } from './llm-config'
 import { buildSystemPrompt } from '../prompts/system'
 import { learnAfterTurn } from './learn'
 
@@ -35,8 +36,7 @@ export type PreparedTurn = {
   system: string
   llmMessages: ChatMessage[]
   citations: Citation[]
-  provider: Provider
-  model: string
+  llm: LlmConfig
   finalize: (answer: string, inputTokens: number, outputTokens: number) => Promise<void>
 }
 
@@ -74,6 +74,9 @@ export async function prepareChatTurn(input: {
       .returning({ id: conversations.id })
     conversationId = conv!.id
   }
+
+  // Resolve the effective LLM config (agent → org → .env).
+  const llm = await resolveLlmConfig(agent.orgId, { provider: agent.provider, model: agent.model })
 
   // 2. Embed the user message (query side).
   const queryEmbedding = await embedOne(message, 'query')
@@ -125,20 +128,11 @@ export async function prepareChatTurn(input: {
       userMessage: message,
       assistantMessage: answer,
       questionEmbedding: queryEmbedding,
-      provider: agent.provider as Provider,
-      model: agent.model,
+      llm,
     })
   }
 
-  return {
-    conversationId,
-    system,
-    llmMessages,
-    citations,
-    provider: agent.provider as Provider,
-    model: agent.model,
-    finalize,
-  }
+  return { conversationId, system, llmMessages, citations, llm, finalize }
 }
 
 async function loadHistory(conversationId: string): Promise<ChatMessage[]> {

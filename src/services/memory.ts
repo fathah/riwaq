@@ -2,7 +2,7 @@ import { and, eq, desc, sql, cosineDistance } from 'drizzle-orm'
 import { db } from '../db/client'
 import { memories } from '../db/schema'
 import { embed } from '../lib/embeddings'
-import { complete, type Provider } from '../lib/llm'
+import { complete, type LlmConfig } from '../lib/llm'
 import { MEMORY_EXTRACT_SYSTEM, memoryExtractUser } from '../prompts/memory-extract'
 
 const RECALL_K = 5
@@ -29,12 +29,10 @@ export async function extractAndStoreMemories(opts: {
   endUserId: string
   userMessage: string
   assistantMessage: string
-  provider: Provider
-  model: string
+  llm: LlmConfig
 }): Promise<void> {
   const { text } = await complete({
-    provider: opts.provider,
-    model: opts.model,
+    config: opts.llm,
     system: MEMORY_EXTRACT_SYSTEM,
     messages: [{ role: 'user', content: memoryExtractUser(opts.userMessage, opts.assistantMessage) }],
     maxTokens: 300,

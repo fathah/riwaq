@@ -119,12 +119,11 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
     throw err
   }
 
-  const { system, llmMessages, citations, conversationId, provider, model, finalize } = prepared
+  const { system, llmMessages, citations, conversationId, llm, finalize } = prepared
   const id = 'chatcmpl-' + randomUUID().replace(/-/g, '')
   const created = Math.floor(Date.now() / 1000)
   const callOpts = {
-    provider,
-    model,
+    config: llm,
     system,
     messages: llmMessages,
     ...(body.max_tokens ? { maxTokens: body.max_tokens } : {}),

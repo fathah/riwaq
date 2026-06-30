@@ -37,7 +37,7 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     throw err
   }
 
-  const { system, llmMessages, citations, conversationId, provider, model, finalize } = prepared
+  const { system, llmMessages, citations, conversationId, llm, finalize } = prepared
 
   // Streaming (SSE): `meta` first (conversationId + citations), then `token`
   // deltas, then `done`. Persistence + learning run after the stream.
@@ -45,7 +45,7 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     return streamSSE(c, async (sse) => {
       await sse.writeSSE({ event: 'meta', data: JSON.stringify({ conversationId, citations }) })
       let answer = ''
-      const s = streamText({ provider, model, system, messages: llmMessages })
+      const s = streamText({ config: llm, system, messages: llmMessages })
       for await (const token of s.tokens) {
         answer += token
         await sse.writeSSE({ event: 'token', data: token })
@@ -56,7 +56,7 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     })
   }
 
-  const { text: answer, inputTokens, outputTokens } = await complete({ provider, model, system, messages: llmMessages })
+  const { text: answer, inputTokens, outputTokens } = await complete({ config: llm, system, messages: llmMessages })
   await finalize(answer, inputTokens, outputTokens)
   return c.json({ answer, citations, conversationId })
 })

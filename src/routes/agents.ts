@@ -5,8 +5,7 @@ import { db } from '../db/client'
 import { agents, agentKnowledgeBases, knowledgeBases } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg } from '../db/guards'
-import { env } from '../env'
-import { DEFAULT_MODEL } from '../lib/llm'
+import { resolveLlmConfig } from '../services/llm-config'
 import type { AppEnv } from '../types'
 
 export const agentsRoute = new Hono<AppEnv>()
@@ -25,19 +24,16 @@ agentsRoute.post('/agents', async (c) => {
   const parsed = createSchema.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
 
-  // Provider defaults to the deployment default; model defaults to that provider's
-  // cheap model unless the caller names one explicitly.
-  const provider = parsed.data.provider ?? env.LLM_DEFAULT_PROVIDER
-  const model = parsed.data.model ?? DEFAULT_MODEL[provider]
-
+  // provider/model are optional per-agent OVERRIDES — left unset, the agent inherits
+  // the org's LLM config, which itself falls back to the .env defaults.
   const result = await db.transaction(async (tx) => {
     const [agent] = await tx
       .insert(agents)
       .values({
         orgId,
         name: parsed.data.name,
-        provider,
-        model,
+        ...(parsed.data.provider !== undefined ? { provider: parsed.data.provider } : {}),
+        ...(parsed.data.model !== undefined ? { model: parsed.data.model } : {}),
         ...(parsed.data.systemPrompt !== undefined ? { systemPrompt: parsed.data.systemPrompt } : {}),
       })
       .returning()
@@ -66,5 +62,13 @@ agentsRoute.get('/agents/:id', async (c) => {
     .innerJoin(knowledgeBases, eq(knowledgeBases.id, agentKnowledgeBases.knowledgeBaseId))
     .where(eq(agentKnowledgeBases.agentId, agent.id))
 
-  return c.json({ ...agent, knowledgeBases: kbs })
+  // Show the effective LLM config (after agent → org → .env resolution), minus the key.
+  const resolved = await resolveLlmConfig(orgId, { provider: agent.provider, model: agent.model })
+  const effectiveLlm = {
+    provider: resolved.provider,
+    model: resolved.model,
+    ...(resolved.baseURL ? { baseURL: resolved.baseURL } : {}),
+  }
+
+  return c.json({ ...agent, knowledgeBases: kbs, effectiveLlm })
 })

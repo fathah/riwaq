@@ -1,11 +1,13 @@
-# riwaq
-
+<p align="center">
+<img src="./assets/riwaq.webp" width="50%"/>
+</p>
 Multi-tenant AI agent infrastructure — **RAG + per-agent memory + question analytics**.
 One backend hosts many organizations, each with many independent agents. Every agent has
 its own private knowledge base and can optionally **share** knowledge bases with other
 agents in the same org.
 
 Provider-agnostic on both sides:
+
 - **Outbound** — each agent runs on Anthropic Claude **or any OpenAI-compatible endpoint**
   (OpenAI, OpenRouter, Groq, Together, local Ollama/vLLM/LM Studio…).
 - **Inbound** — exposes an **OpenAI-compatible API** so any OpenAI client can talk to your agents.
@@ -30,9 +32,9 @@ question into a **topic** (powering "most asked"), and stores which chunks were 
 
 **Isolation by default, sharing by opt-in:**
 
-| Always isolated per agent | Shareable within an org (opt-in) |
-|---|---|
-| memory, conversations, messages, topics, analytics, feedback | knowledge bases |
+| Always isolated per agent                                    | Shareable within an org (opt-in) |
+| ------------------------------------------------------------ | -------------------------------- |
+| memory, conversations, messages, topics, analytics, feedback | knowledge bases                  |
 
 Nothing ever crosses an organization boundary.
 
@@ -104,27 +106,43 @@ curl -sX POST $B/messages/<messageId>/feedback -H "authorization: Bearer $KEY" \
 curl -s $B/agents/$AGENT/analytics/top-questions -H "authorization: Bearer $KEY"
 ```
 
-### Choosing the LLM (per agent)
+### Choosing the LLM
 
-Each agent picks its inference backend at creation. `provider` is `anthropic` (Claude) or
-`openai` (**any** OpenAI-compatible endpoint); `model` is whatever that backend exposes.
+The LLM config (`provider`, `model`, `baseURL`, `apiKey`) resolves through three layers —
+each fills in what the one below leaves unset:
 
-```bash
-# Claude (default provider)
-curl -sX POST $B/agents -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
-  -d '{"name":"Claude Bot","model":"claude-sonnet-4-6"}'
-
-# OpenAI-compatible — model name is the backend's own
-curl -sX POST $B/agents -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
-  -d '{"name":"GPT Bot","provider":"openai","model":"gpt-4o-mini"}'
-curl -sX POST $B/agents -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
-  -d '{"name":"Llama Bot","provider":"openai","model":"llama-3.3-70b-versatile"}'
+```
+agent override  →  organization config  →  .env default
 ```
 
-Which OpenAI-compatible server gets called is set **per deployment** via `OPENAI_BASE_URL`
-+ `OPENAI_API_KEY` (see [Configuration](#configuration)). Default the whole deployment to
-OpenAI by setting `LLM_DEFAULT_PROVIDER=openai`. Everything else — RAG, memory, analytics,
-the inbound API — works identically regardless of provider.
+So an organization can **bring its own endpoint/key/model**, while the deployment-wide
+`.env` provides the fallback. `provider` is `anthropic` (Claude) or `openai` (**any**
+OpenAI-compatible endpoint: OpenAI, OpenRouter, Groq, Together, Ollama, vLLM, LM Studio…).
+
+**Per-organization** (most common — BYO key/endpoint):
+
+```bash
+curl -sX PUT $B/organizations/llm -H "authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -d '{
+    "provider":"openai",
+    "baseUrl":"https://openrouter.ai/api/v1",
+    "apiKey":"sk-or-...",
+    "model":"openai/gpt-4o-mini"
+  }'
+# send a field as null to clear it (falls back to .env); GET /organizations/me shows
+# the config with the key masked (hasApiKey: true)
+```
+
+**Per-agent override** (optional — a specific agent on a different model/provider):
+
+```bash
+curl -sX POST $B/agents -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"name":"Premium Bot","model":"claude-sonnet-4-6","provider":"anthropic"}'
+```
+
+`GET /agents/:id` returns `effectiveLlm` (the resolved provider/model/baseURL, key omitted).
+Everything else — RAG, memory, analytics, the inbound API — works identically regardless
+of provider.
 
 ### Shared knowledge bases
 
@@ -147,8 +165,8 @@ linked to agents in the same org.
 
 ## OpenAI-compatible API (inbound)
 
-> This is the **inbound** side — Riwaq *speaking* the OpenAI protocol to clients. It's
-> independent of which provider an agent uses *outbound*; a Claude-backed agent is still
+> This is the **inbound** side — Riwaq _speaking_ the OpenAI protocol to clients. It's
+> independent of which provider an agent uses _outbound_; a Claude-backed agent is still
 > reachable here.
 
 Point any OpenAI client at `http://localhost:3000/v1`, use your **org API key** as the
@@ -190,27 +208,28 @@ Works out of the box with the `openai` SDKs, LangChain, OpenWebUI, LibreChat, an
 
 ## Endpoints
 
-| Method | Path | Notes |
-|--------|------|-------|
-| POST | `/organizations` | **public**; returns `apiKey` once |
-| GET | `/organizations/me` | current org |
-| POST | `/agents` | `{ name, systemPrompt?, provider?, model? }`; auto-creates the agent's private KB |
-| GET | `/agents/:id` | agent + linked KBs |
-| POST | `/knowledge-bases` | create a shared KB |
-| GET | `/knowledge-bases` | list the org's KBs |
-| POST | `/agents/:id/knowledge-bases` | link a shared KB to an agent |
-| GET | `/agents/:id/knowledge-bases` | KBs the agent can read |
-| DELETE | `/agents/:id/knowledge-bases/:kbId` | unlink (never the private KB) |
-| POST | `/knowledge-bases/:kbId/documents` | upload file or text → async ingest |
-| POST | `/agents/:id/documents` | convenience: upload into the agent's private KB |
-| GET | `/knowledge-bases/:kbId/documents` | list documents (with status) |
-| DELETE | `/knowledge-bases/:kbId/documents/:docId` | delete (cascades to chunks) |
-| POST | `/agents/:id/chat` | `{ endUserId, message, conversationId? }`; `?stream=1` for SSE |
-| POST | `/messages/:id/feedback` | `{ rating: "up" \| "down" }` |
-| GET | `/agents/:id/analytics/top-questions` | most-asked topics |
-| POST | `/v1/chat/completions` | OpenAI-compatible; `model` = agent id/name; `stream` supported |
-| GET | `/v1/models` | the org's agents, as OpenAI models |
-| GET | `/health` | DB ping |
+| Method | Path                                      | Notes                                                                             |
+| ------ | ----------------------------------------- | --------------------------------------------------------------------------------- |
+| POST   | `/organizations`                          | **public**; returns `apiKey` once                                                 |
+| GET    | `/organizations/me`                       | current org + LLM config (key masked)                                             |
+| PUT    | `/organizations/llm`                      | set org LLM config `{ provider?, baseUrl?, apiKey?, model? }` (null clears)       |
+| POST   | `/agents`                                 | `{ name, systemPrompt?, provider?, model? }`; auto-creates the agent's private KB |
+| GET    | `/agents/:id`                             | agent + linked KBs                                                                |
+| POST   | `/knowledge-bases`                        | create a shared KB                                                                |
+| GET    | `/knowledge-bases`                        | list the org's KBs                                                                |
+| POST   | `/agents/:id/knowledge-bases`             | link a shared KB to an agent                                                      |
+| GET    | `/agents/:id/knowledge-bases`             | KBs the agent can read                                                            |
+| DELETE | `/agents/:id/knowledge-bases/:kbId`       | unlink (never the private KB)                                                     |
+| POST   | `/knowledge-bases/:kbId/documents`        | upload file or text → async ingest                                                |
+| POST   | `/agents/:id/documents`                   | convenience: upload into the agent's private KB                                   |
+| GET    | `/knowledge-bases/:kbId/documents`        | list documents (with status)                                                      |
+| DELETE | `/knowledge-bases/:kbId/documents/:docId` | delete (cascades to chunks)                                                       |
+| POST   | `/agents/:id/chat`                        | `{ endUserId, message, conversationId? }`; `?stream=1` for SSE                    |
+| POST   | `/messages/:id/feedback`                  | `{ rating: "up" \| "down" }`                                                      |
+| GET    | `/agents/:id/analytics/top-questions`     | most-asked topics                                                                 |
+| POST   | `/v1/chat/completions`                    | OpenAI-compatible; `model` = agent id/name; `stream` supported                    |
+| GET    | `/v1/models`                              | the org's agents, as OpenAI models                                                |
+| GET    | `/health`                                 | DB ping                                                                           |
 
 ---
 
@@ -260,15 +279,15 @@ OpenAI-compatible endpoint (per agent) · Voyage AI embeddings (`voyage-3`, 1024
 
 ## Configuration
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DATABASE_URL` | yes | Postgres connection string (pgvector-enabled) |
-| `ANTHROPIC_API_KEY` | for `anthropic` agents | Anthropic Claude key |
-| `OPENAI_API_KEY` | for `openai` agents | Key for the OpenAI-compatible endpoint |
-| `OPENAI_BASE_URL` | no | OpenAI-compatible base URL (default `https://api.openai.com/v1`) |
-| `LLM_DEFAULT_PROVIDER` | no | `anthropic` (default) or `openai` — used when an agent omits `provider` |
-| `EMBEDDINGS_API_KEY` | for ingest/chat | Voyage AI key |
-| `PORT` | no | HTTP port (default 3000) |
+| Variable               | Required               | Description                                                             |
+| ---------------------- | ---------------------- | ----------------------------------------------------------------------- |
+| `DATABASE_URL`         | yes                    | Postgres connection string (pgvector-enabled)                           |
+| `ANTHROPIC_API_KEY`    | for `anthropic` agents | Anthropic Claude key                                                    |
+| `OPENAI_API_KEY`       | for `openai` agents    | Key for the OpenAI-compatible endpoint                                  |
+| `OPENAI_BASE_URL`      | no                     | OpenAI-compatible base URL (default `https://api.openai.com/v1`)        |
+| `LLM_DEFAULT_PROVIDER` | no                     | `anthropic` (default) or `openai` — used when an agent omits `provider` |
+| `EMBEDDINGS_API_KEY`   | for ingest/chat        | Voyage AI key                                                           |
+| `PORT`                 | no                     | HTTP port (default 3000)                                                |
 
 ## Development
 

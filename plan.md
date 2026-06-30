@@ -83,14 +83,19 @@ extract memory, classify topic, update counters) runs *after* the response is se
   `pgvector/pgvector:pg16`.
 - **DB access:** `postgres` (postgres.js) + `drizzle-orm` for typed schema & migrations
   (clean pgvector support).
-- **LLM (provider-agnostic):** each agent picks a `provider` + `model`.
+- **LLM (provider-agnostic, layered config):** config resolves
+  **agent override → org config → `.env` default** (`services/llm-config.ts`).
   - `anthropic` — Claude via `@anthropic-ai/sdk` (default `claude-haiku-4-5-20251001`,
     `claude-sonnet-4-6` when quality matters).
-  - `openai` — **any OpenAI-compatible endpoint** via the `openai` SDK pointed at
-    `OPENAI_BASE_URL` (OpenAI, OpenRouter, Groq, Together, Ollama, vLLM, LM Studio…).
-  - Both sit behind one `complete()` / `streamText()` interface in `lib/llm.ts`, so the
-    chat pipeline, memory extraction, and topic labeling are provider-blind.
-  - Deployment default via `LLM_DEFAULT_PROVIDER`; credentials/base URL via env.
+  - `openai` — **any OpenAI-compatible endpoint** via the `openai` SDK pointed at a
+    `baseURL` (OpenAI, OpenRouter, Groq, Together, Ollama, vLLM, LM Studio…).
+  - An **org brings its own** `provider`/`baseURL`/`apiKey`/`model`; the org bundle only
+    applies when the resolved provider matches it (an agent that switches provider falls
+    back to env creds, not the org's). Deployment defaults: `LLM_DEFAULT_PROVIDER`,
+    `LLM_DEFAULT_MODEL`, `OPENAI_BASE_URL`, keys.
+  - Both backends sit behind one `complete()` / `streamText()` interface in `lib/llm.ts`
+    (unified streaming), so the chat pipeline, memory extraction, and topic labeling are
+    provider-blind. Clients are cached per (baseURL, apiKey).
 - **Embeddings:** Voyage AI `voyage-3` (Anthropic's recommended partner), **1024 dims**,
   via REST. `vector(1024)` columns are locked to this. An `EmbeddingProvider` interface
   keeps OpenAI `text-embedding-3-small` (1536) swappable — never mix dims in one DB.
@@ -134,6 +139,7 @@ riwaq/
     │   └── analytics.ts
     ├── services/
     │   ├── chat.ts             # prepareChatTurn — shared pipeline (native + OpenAI)
+    │   ├── llm-config.ts       # resolve agent → org → .env LLM config
     │   ├── ingest.ts           # parse → chunk → embed → store (into a KB)
     │   ├── retrieve.ts         # resolve agent's KB set → top-k across them
     │   ├── memory.ts           # recall + extraction/upsert (per-agent)
@@ -151,9 +157,11 @@ riwaq/
 **Organizations & agents**
 | Method | Path | Body / Notes |
 |--------|------|--------------|
-| POST | `/organizations` | `{ name }` → org |
-| POST | `/agents` | `{ orgId, name, systemPrompt?, model? }` → auto-creates a private KB |
-| GET | `/agents/:id` | agent + linked KBs |
+| POST | `/organizations` | `{ name }` → org (returns apiKey once) |
+| GET | `/organizations/me` | org + LLM config (key masked) |
+| PUT | `/organizations/llm` | `{ provider?, baseUrl?, apiKey?, model? }` (null clears → .env) |
+| POST | `/agents` | `{ name, systemPrompt?, provider?, model? }` → auto-creates a private KB |
+| GET | `/agents/:id` | agent + linked KBs + `effectiveLlm` |
 
 **Knowledge bases (first-class, shareable)**
 | Method | Path | Body / Notes |
@@ -223,9 +231,13 @@ POST /v1/chat/completions
 ## 6. Data model (Postgres + pgvector)
 
 ```
-organizations         id, name, created_at
+organizations         id, name, api_key,
+                      llm_provider, llm_base_url, llm_api_key, llm_model,   -- per-org LLM (nullable → .env)
+                      created_at
 
-agents                id, org_id→, name, system_prompt, provider, model, created_at
+agents                id, org_id→, name, system_prompt,
+                      provider, model,   -- nullable per-agent overrides (null → inherit org/.env)
+                      created_at
 
 knowledge_bases       id, org_id→, name, is_default(bool), created_at
                       -- is_default = the private KB auto-made for one agent

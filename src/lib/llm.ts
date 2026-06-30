@@ -60,9 +60,10 @@ type CallOpts = {
 
 /** One-shot completion. Same shape regardless of provider. */
 export async function complete(opts: CallOpts): Promise<LLMResult> {
-  if (opts.provider === 'openai') {
-    const res = await openaiClient().chat.completions.create({
-      model: opts.model,
+  const { config } = opts
+  if (config.provider === 'openai') {
+    const res = await openaiClient(config).chat.completions.create({
+      model: config.model,
       messages: [{ role: 'system', content: opts.system }, ...opts.messages],
       max_tokens: opts.maxTokens ?? 1024,
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
@@ -74,8 +75,8 @@ export async function complete(opts: CallOpts): Promise<LLMResult> {
     }
   }
 
-  const res = await anthropicClient().messages.create({
-    model: opts.model,
+  const res = await anthropicClient(config).messages.create({
+    model: config.model,
     system: opts.system,
     max_tokens: opts.maxTokens ?? 1024,
     messages: opts.messages,
@@ -92,15 +93,15 @@ export async function complete(opts: CallOpts): Promise<LLMResult> {
 export type LLMStream = { tokens: AsyncGenerator<string>; usage: Promise<Usage> }
 
 export function streamText(opts: CallOpts): LLMStream {
-  return opts.provider === 'openai' ? openaiStream(opts) : anthropicStream(opts)
+  return opts.config.provider === 'openai' ? openaiStream(opts) : anthropicStream(opts)
 }
 
 function anthropicStream(opts: CallOpts): LLMStream {
   let resolve!: (u: Usage) => void
   const usage = new Promise<Usage>((r) => (resolve = r))
   async function* tokens(): AsyncGenerator<string> {
-    const s = anthropicClient().messages.stream({
-      model: opts.model,
+    const s = anthropicClient(opts.config).messages.stream({
+      model: opts.config.model,
       system: opts.system,
       max_tokens: opts.maxTokens ?? 1024,
       messages: opts.messages,
@@ -121,8 +122,8 @@ function openaiStream(opts: CallOpts): LLMStream {
   let resolve!: (u: Usage) => void
   const usage = new Promise<Usage>((r) => (resolve = r))
   async function* tokens(): AsyncGenerator<string> {
-    const stream = await openaiClient().chat.completions.create({
-      model: opts.model,
+    const stream = await openaiClient(opts.config).chat.completions.create({
+      model: opts.config.model,
       messages: [{ role: 'system', content: opts.system }, ...opts.messages],
       max_tokens: opts.maxTokens ?? 1024,
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),

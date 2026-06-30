@@ -1,12 +1,12 @@
 import { classifyQuestion } from './topics'
 import { extractAndStoreMemories } from './memory'
-import type { Provider } from '../lib/llm'
+import type { LlmConfig } from '../lib/llm'
 
 /**
  * The async "learning loop". Fire-and-forget after the chat response is sent so
  * it never adds latency. Each piece is independently wrapped so one failure
- * doesn't sink the others. The cheap extraction/labeling calls reuse the agent's
- * own provider + model, so this works on any backend. (Upgrade path: durable queue.)
+ * doesn't sink the others. The cheap extraction/labeling calls reuse the turn's
+ * resolved LLM config, so this works on any provider. (Upgrade path: durable queue.)
  */
 export function learnAfterTurn(opts: {
   agentId: string
@@ -15,8 +15,7 @@ export function learnAfterTurn(opts: {
   userMessage: string
   assistantMessage: string
   questionEmbedding: number[]
-  provider: Provider
-  model: string
+  llm: LlmConfig
 }): void {
   void (async () => {
     // Topic clustering (reuses the query embedding we already computed).
@@ -26,8 +25,7 @@ export function learnAfterTurn(opts: {
         messageId: opts.userMessageId,
         question: opts.userMessage,
         embedding: opts.questionEmbedding,
-        provider: opts.provider,
-        model: opts.model,
+        llm: opts.llm,
       })
     } catch (err) {
       console.error('[learn] topic classification failed', err)
@@ -40,8 +38,7 @@ export function learnAfterTurn(opts: {
         endUserId: opts.endUserId,
         userMessage: opts.userMessage,
         assistantMessage: opts.assistantMessage,
-        provider: opts.provider,
-        model: opts.model,
+        llm: opts.llm,
       })
     } catch (err) {
       console.error('[learn] memory extraction failed', err)
