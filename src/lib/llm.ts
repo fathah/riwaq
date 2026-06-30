@@ -20,12 +20,14 @@ export async function complete(opts: {
   system: string
   messages: ChatMessage[]
   maxTokens?: number
+  temperature?: number
 }): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
   const res = await anthropic().messages.create({
     model: opts.model ?? DEFAULT_MODEL,
     system: opts.system,
     max_tokens: opts.maxTokens ?? 1024,
     messages: opts.messages,
+    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
   })
   const text = res.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
@@ -39,11 +41,18 @@ export async function complete(opts: {
 }
 
 /** Streaming variant — yields text deltas. Used by the chat SSE path. */
-export function stream(opts: { model?: string; system: string; messages: ChatMessage[]; maxTokens?: number }) {
+export function stream(opts: {
+  model?: string
+  system: string
+  messages: ChatMessage[]
+  maxTokens?: number
+  temperature?: number
+}) {
   return anthropic().messages.stream({
     model: opts.model ?? DEFAULT_MODEL,
     system: opts.system,
     max_tokens: opts.maxTokens ?? 1024,
     messages: opts.messages,
+    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
   })
 }
