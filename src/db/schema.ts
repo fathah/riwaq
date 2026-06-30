@@ -18,6 +18,11 @@ export const organizations = pgTable('organizations', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
   apiKey: text('api_key').notNull().unique(),
+  // Per-org LLM overrides. Each is nullable → falls back to the .env default.
+  llmProvider: text('llm_provider'), // 'anthropic' | 'openai'
+  llmBaseUrl: text('llm_base_url'), // OpenAI-compatible base URL
+  llmApiKey: text('llm_api_key'), // key for the org's chosen provider/endpoint
+  llmModel: text('llm_model'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
@@ -28,7 +33,9 @@ export const agents = pgTable('agents', {
     .references(() => organizations.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),
   systemPrompt: text('system_prompt').notNull().default(''),
-  model: text('model').notNull().default('claude-haiku-4-5-20251001'),
+  // Optional per-agent overrides of the org's LLM config. Null → inherit from org/.env.
+  provider: text('provider'), // 'anthropic' | 'openai'
+  model: text('model'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 

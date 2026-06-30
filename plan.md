@@ -83,9 +83,14 @@ extract memory, classify topic, update counters) runs *after* the response is se
   `pgvector/pgvector:pg16`.
 - **DB access:** `postgres` (postgres.js) + `drizzle-orm` for typed schema & migrations
   (clean pgvector support).
-- **LLM:** Anthropic Claude via `@anthropic-ai/sdk`.
-  - Default `claude-haiku-4-5-20251001` (chat, memory extraction, topic labels).
-  - `claude-sonnet-4-6` opt-in per-agent (`agents.model`) when quality matters.
+- **LLM (provider-agnostic):** each agent picks a `provider` + `model`.
+  - `anthropic` — Claude via `@anthropic-ai/sdk` (default `claude-haiku-4-5-20251001`,
+    `claude-sonnet-4-6` when quality matters).
+  - `openai` — **any OpenAI-compatible endpoint** via the `openai` SDK pointed at
+    `OPENAI_BASE_URL` (OpenAI, OpenRouter, Groq, Together, Ollama, vLLM, LM Studio…).
+  - Both sit behind one `complete()` / `streamText()` interface in `lib/llm.ts`, so the
+    chat pipeline, memory extraction, and topic labeling are provider-blind.
+  - Deployment default via `LLM_DEFAULT_PROVIDER`; credentials/base URL via env.
 - **Embeddings:** Voyage AI `voyage-3` (Anthropic's recommended partner), **1024 dims**,
   via REST. `vector(1024)` columns are locked to this. An `EmbeddingProvider` interface
   keeps OpenAI `text-embedding-3-small` (1536) swappable — never mix dims in one DB.
@@ -220,7 +225,7 @@ POST /v1/chat/completions
 ```
 organizations         id, name, created_at
 
-agents                id, org_id→, name, system_prompt, model, created_at
+agents                id, org_id→, name, system_prompt, provider, model, created_at
 
 knowledge_bases       id, org_id→, name, is_default(bool), created_at
                       -- is_default = the private KB auto-made for one agent

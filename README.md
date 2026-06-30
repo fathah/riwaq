@@ -1,9 +1,14 @@
 # riwaq
 
-Multi-tenant AI agent infrastructure — **RAG + per-agent memory + question analytics**,
-with an **OpenAI-compatible API** built in. One backend hosts many organizations, each
-with many independent agents. Every agent has its own private knowledge base and can
-optionally **share** knowledge bases with other agents in the same org.
+Multi-tenant AI agent infrastructure — **RAG + per-agent memory + question analytics**.
+One backend hosts many organizations, each with many independent agents. Every agent has
+its own private knowledge base and can optionally **share** knowledge bases with other
+agents in the same org.
+
+Provider-agnostic on both sides:
+- **Outbound** — each agent runs on Anthropic Claude **or any OpenAI-compatible endpoint**
+  (OpenAI, OpenRouter, Groq, Together, local Ollama/vLLM/LM Studio…).
+- **Inbound** — exposes an **OpenAI-compatible API** so any OpenAI client can talk to your agents.
 
 Docker-first, API-first. The full design lives in [plan.md](plan.md).
 
@@ -99,6 +104,28 @@ curl -sX POST $B/messages/<messageId>/feedback -H "authorization: Bearer $KEY" \
 curl -s $B/agents/$AGENT/analytics/top-questions -H "authorization: Bearer $KEY"
 ```
 
+### Choosing the LLM (per agent)
+
+Each agent picks its inference backend at creation. `provider` is `anthropic` (Claude) or
+`openai` (**any** OpenAI-compatible endpoint); `model` is whatever that backend exposes.
+
+```bash
+# Claude (default provider)
+curl -sX POST $B/agents -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"name":"Claude Bot","model":"claude-sonnet-4-6"}'
+
+# OpenAI-compatible — model name is the backend's own
+curl -sX POST $B/agents -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"name":"GPT Bot","provider":"openai","model":"gpt-4o-mini"}'
+curl -sX POST $B/agents -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"name":"Llama Bot","provider":"openai","model":"llama-3.3-70b-versatile"}'
+```
+
+Which OpenAI-compatible server gets called is set **per deployment** via `OPENAI_BASE_URL`
++ `OPENAI_API_KEY` (see [Configuration](#configuration)). Default the whole deployment to
+OpenAI by setting `LLM_DEFAULT_PROVIDER=openai`. Everything else — RAG, memory, analytics,
+the inbound API — works identically regardless of provider.
+
 ### Shared knowledge bases
 
 ```bash
@@ -118,7 +145,11 @@ linked to agents in the same org.
 
 ---
 
-## OpenAI-compatible API
+## OpenAI-compatible API (inbound)
+
+> This is the **inbound** side — Riwaq *speaking* the OpenAI protocol to clients. It's
+> independent of which provider an agent uses *outbound*; a Claude-backed agent is still
+> reachable here.
 
 Point any OpenAI client at `http://localhost:3000/v1`, use your **org API key** as the
 OpenAI key, and pass the **agent id or name** as `model`. The same RAG + memory +
@@ -163,7 +194,7 @@ Works out of the box with the `openai` SDKs, LangChain, OpenWebUI, LibreChat, an
 |--------|------|-------|
 | POST | `/organizations` | **public**; returns `apiKey` once |
 | GET | `/organizations/me` | current org |
-| POST | `/agents` | auto-creates the agent's private KB |
+| POST | `/agents` | `{ name, systemPrompt?, provider?, model? }`; auto-creates the agent's private KB |
 | GET | `/agents/:id` | agent + linked KBs |
 | POST | `/knowledge-bases` | create a shared KB |
 | GET | `/knowledge-bases` | list the org's KBs |
@@ -224,15 +255,18 @@ src/
 ## Stack
 
 TypeScript · [Hono](https://hono.dev) · Postgres + [pgvector](https://github.com/pgvector/pgvector) ·
-[Drizzle ORM](https://orm.drizzle.team) · Anthropic Claude (`claude-haiku-4-5-20251001`
-default, per-agent override) · Voyage AI embeddings (`voyage-3`, 1024-d).
+[Drizzle ORM](https://orm.drizzle.team) · LLM via Anthropic Claude **or** any
+OpenAI-compatible endpoint (per agent) · Voyage AI embeddings (`voyage-3`, 1024-d).
 
 ## Configuration
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | yes | Postgres connection string (pgvector-enabled) |
-| `ANTHROPIC_API_KEY` | for chat | Anthropic Claude key |
+| `ANTHROPIC_API_KEY` | for `anthropic` agents | Anthropic Claude key |
+| `OPENAI_API_KEY` | for `openai` agents | Key for the OpenAI-compatible endpoint |
+| `OPENAI_BASE_URL` | no | OpenAI-compatible base URL (default `https://api.openai.com/v1`) |
+| `LLM_DEFAULT_PROVIDER` | no | `anthropic` (default) or `openai` — used when an agent omits `provider` |
 | `EMBEDDINGS_API_KEY` | for ingest/chat | Voyage AI key |
 | `PORT` | no | HTTP port (default 3000) |
 
@@ -248,8 +282,9 @@ npm run migrate    # apply migrations standalone
 ## Status & roadmap
 
 Working: tenancy + org auth, agents with auto private KB, shared KBs, ingestion
-(pdf/txt/md), retrieval, native + OpenAI-compatible chat (with streaming), per-agent
-memory, topic analytics, feedback.
+(pdf/txt/md), retrieval, per-agent LLM provider (Anthropic or any OpenAI-compatible
+endpoint), native + inbound-OpenAI-compatible chat (with streaming), per-agent memory,
+topic analytics, feedback.
 
 Deferred (see [plan.md](plan.md) §11): finer KB access control (read-only shared KBs),
 rate limiting/quotas, a durable job queue for ingestion, retrieval re-ranking, and

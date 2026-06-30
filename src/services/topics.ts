@@ -1,7 +1,7 @@
 import { eq, desc, sql, cosineDistance } from 'drizzle-orm'
 import { db } from '../db/client'
 import { topics, questionLogs } from '../db/schema'
-import { complete, DEFAULT_MODEL } from '../lib/llm'
+import { complete, type Provider } from '../lib/llm'
 import { TOPIC_LABEL_SYSTEM } from '../prompts/memory-extract'
 
 // If a question is at least this similar to an existing topic centroid, it joins
@@ -17,7 +17,8 @@ export async function classifyQuestion(opts: {
   messageId: string
   question: string
   embedding: number[]
-  model?: string
+  provider: Provider
+  model: string
 }): Promise<string> {
   const similarity = sql<number>`1 - (${cosineDistance(topics.centroid, opts.embedding)})`
   const [nearest] = await db
@@ -36,7 +37,7 @@ export async function classifyQuestion(opts: {
       .where(eq(topics.id, nearest.id))
     topicId = nearest.id
   } else {
-    const label = await labelQuestion(opts.question, opts.model)
+    const label = await labelQuestion(opts.question, opts.provider, opts.model)
     const [created] = await db
       .insert(topics)
       .values({ agentId: opts.agentId, label, centroid: opts.embedding, count: 1 })
@@ -54,10 +55,11 @@ export async function classifyQuestion(opts: {
   return topicId
 }
 
-async function labelQuestion(question: string, model?: string): Promise<string> {
+async function labelQuestion(question: string, provider: Provider, model: string): Promise<string> {
   try {
     const { text } = await complete({
-      model: model ?? DEFAULT_MODEL,
+      provider,
+      model,
       system: TOPIC_LABEL_SYSTEM,
       messages: [{ role: 'user', content: question }],
       maxTokens: 20,

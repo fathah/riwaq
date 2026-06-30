@@ -3,7 +3,7 @@ import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg } from '../db/guards'
-import { complete, stream } from '../lib/llm'
+import { complete, streamText } from '../lib/llm'
 import { prepareChatTurn, ChatError } from '../services/chat'
 import type { AppEnv } from '../types'
 
@@ -37,7 +37,7 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     throw err
   }
 
-  const { system, llmMessages, citations, conversationId, model, finalize } = prepared
+  const { system, llmMessages, citations, conversationId, provider, model, finalize } = prepared
 
   // Streaming (SSE): `meta` first (conversationId + citations), then `token`
   // deltas, then `done`. Persistence + learning run after the stream.
@@ -45,20 +45,18 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     return streamSSE(c, async (sse) => {
       await sse.writeSSE({ event: 'meta', data: JSON.stringify({ conversationId, citations }) })
       let answer = ''
-      const s = stream({ model, system, messages: llmMessages })
-      for await (const event of s) {
-        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          answer += event.delta.text
-          await sse.writeSSE({ event: 'token', data: event.delta.text })
-        }
+      const s = streamText({ provider, model, system, messages: llmMessages })
+      for await (const token of s.tokens) {
+        answer += token
+        await sse.writeSSE({ event: 'token', data: token })
       }
-      const final = await s.finalMessage()
+      const usage = await s.usage
       await sse.writeSSE({ event: 'done', data: JSON.stringify({ answer }) })
-      await finalize(answer, final.usage.input_tokens, final.usage.output_tokens)
+      await finalize(answer, usage.inputTokens, usage.outputTokens)
     })
   }
 
-  const { text: answer, inputTokens, outputTokens } = await complete({ model, system, messages: llmMessages })
+  const { text: answer, inputTokens, outputTokens } = await complete({ provider, model, system, messages: llmMessages })
   await finalize(answer, inputTokens, outputTokens)
   return c.json({ answer, citations, conversationId })
 })

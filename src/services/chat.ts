@@ -2,7 +2,7 @@ import { and, desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agents, conversations, messages } from '../db/schema'
 import { embedOne } from '../lib/embeddings'
-import type { ChatMessage } from '../lib/llm'
+import type { ChatMessage, Provider } from '../lib/llm'
 import { searchChunks } from './retrieve'
 import { recallMemories } from './memory'
 import { buildSystemPrompt } from '../prompts/system'
@@ -35,6 +35,7 @@ export type PreparedTurn = {
   system: string
   llmMessages: ChatMessage[]
   citations: Citation[]
+  provider: Provider
   model: string
   finalize: (answer: string, inputTokens: number, outputTokens: number) => Promise<void>
 }
@@ -124,11 +125,20 @@ export async function prepareChatTurn(input: {
       userMessage: message,
       assistantMessage: answer,
       questionEmbedding: queryEmbedding,
+      provider: agent.provider as Provider,
       model: agent.model,
     })
   }
 
-  return { conversationId, system, llmMessages, citations, model: agent.model, finalize }
+  return {
+    conversationId,
+    system,
+    llmMessages,
+    citations,
+    provider: agent.provider as Provider,
+    model: agent.model,
+    finalize,
+  }
 }
 
 async function loadHistory(conversationId: string): Promise<ChatMessage[]> {

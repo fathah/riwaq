@@ -5,6 +5,8 @@ import { db } from '../db/client'
 import { agents, agentKnowledgeBases, knowledgeBases } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg } from '../db/guards'
+import { env } from '../env'
+import { DEFAULT_MODEL } from '../lib/llm'
 import type { AppEnv } from '../types'
 
 export const agentsRoute = new Hono<AppEnv>()
@@ -13,6 +15,7 @@ agentsRoute.use('*', orgAuth)
 const createSchema = z.object({
   name: z.string().min(1),
   systemPrompt: z.string().optional(),
+  provider: z.enum(['anthropic', 'openai']).optional(),
   model: z.string().optional(),
 })
 
@@ -22,14 +25,20 @@ agentsRoute.post('/agents', async (c) => {
   const parsed = createSchema.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
 
+  // Provider defaults to the deployment default; model defaults to that provider's
+  // cheap model unless the caller names one explicitly.
+  const provider = parsed.data.provider ?? env.LLM_DEFAULT_PROVIDER
+  const model = parsed.data.model ?? DEFAULT_MODEL[provider]
+
   const result = await db.transaction(async (tx) => {
     const [agent] = await tx
       .insert(agents)
       .values({
         orgId,
         name: parsed.data.name,
+        provider,
+        model,
         ...(parsed.data.systemPrompt !== undefined ? { systemPrompt: parsed.data.systemPrompt } : {}),
-        ...(parsed.data.model !== undefined ? { model: parsed.data.model } : {}),
       })
       .returning()
 

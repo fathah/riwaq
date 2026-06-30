@@ -6,7 +6,7 @@ import { db } from '../db/client'
 import { agents } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg } from '../db/guards'
-import { complete, stream, type ChatMessage } from '../lib/llm'
+import { complete, streamText, type ChatMessage } from '../lib/llm'
 import { prepareChatTurn, ChatError, type Agent } from '../services/chat'
 import type { AppEnv } from '../types'
 
@@ -119,10 +119,11 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
     throw err
   }
 
-  const { system, llmMessages, citations, conversationId, model, finalize } = prepared
+  const { system, llmMessages, citations, conversationId, provider, model, finalize } = prepared
   const id = 'chatcmpl-' + randomUUID().replace(/-/g, '')
   const created = Math.floor(Date.now() / 1000)
   const callOpts = {
+    provider,
     model,
     system,
     messages: llmMessages,
@@ -144,22 +145,20 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
       })
 
       let answer = ''
-      const s = stream(callOpts)
-      for await (const event of s) {
-        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          answer += event.delta.text
-          await sse.writeSSE({
-            data: JSON.stringify({
-              id,
-              object: 'chat.completion.chunk',
-              created,
-              model: body.model,
-              choices: [{ index: 0, delta: { content: event.delta.text }, finish_reason: null }],
-            }),
-          })
-        }
+      const s = streamText(callOpts)
+      for await (const token of s.tokens) {
+        answer += token
+        await sse.writeSSE({
+          data: JSON.stringify({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model: body.model,
+            choices: [{ index: 0, delta: { content: token }, finish_reason: null }],
+          }),
+        })
       }
-      const final = await s.finalMessage()
+      const usage = await s.usage
 
       await sse.writeSSE({
         data: JSON.stringify({
@@ -171,9 +170,9 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
           ...(body.stream_options?.include_usage
             ? {
                 usage: {
-                  prompt_tokens: final.usage.input_tokens,
-                  completion_tokens: final.usage.output_tokens,
-                  total_tokens: final.usage.input_tokens + final.usage.output_tokens,
+                  prompt_tokens: usage.inputTokens,
+                  completion_tokens: usage.outputTokens,
+                  total_tokens: usage.inputTokens + usage.outputTokens,
                 },
               }
             : {}),
@@ -182,7 +181,7 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
         }),
       })
       await sse.writeSSE({ data: '[DONE]' })
-      await finalize(answer, final.usage.input_tokens, final.usage.output_tokens)
+      await finalize(answer, usage.inputTokens, usage.outputTokens)
     })
   }
 
