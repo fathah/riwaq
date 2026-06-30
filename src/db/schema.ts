@@ -9,10 +9,12 @@ import {
   vector,
   primaryKey,
 } from 'drizzle-orm/pg-core'
+import { env } from '../env'
 
-// Embedding dimension — locked to Voyage voyage-3. Changing this requires a
-// full re-embed and a new migration; never mix dimensions in one DB.
-export const EMBEDDING_DIM = 1024
+// Embedding dimension — comes from EMBEDDING_DIM and must match the embedding
+// model. Locked into the columns at first migration; changing it requires a
+// re-embed. Never mix dimensions in one DB.
+export const EMBEDDING_DIM = env.EMBEDDING_DIM
 
 export const organizations = pgTable('organizations', {
   id: uuid('id').primaryKey().defaultRandom(),

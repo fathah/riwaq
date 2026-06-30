@@ -137,8 +137,9 @@ riwaq/
     │   ├── openai.ts           # OpenAI-compatible /v1/chat/completions + /v1/models
     │   ├── feedback.ts
     │   └── analytics.ts
+    ├── serializers.ts          # canonical ChatResult → native | openai (+ stream frames)
     ├── services/
-    │   ├── chat.ts             # prepareChatTurn — shared pipeline (native + OpenAI)
+    │   ├── chat.ts             # prepareChatTurn / runChatTurn / streamChatTurn (canonical)
     │   ├── llm-config.ts       # resolve agent → org → .env LLM config
     │   ├── ingest.ts           # parse → chunk → embed → store (into a KB)
     │   ├── retrieve.ts         # resolve agent's KB set → top-k across them
@@ -193,6 +194,33 @@ riwaq/
 |--------|------|--------------|---------|
 | POST | `/v1/chat/completions` | OpenAI chat shape; `model` = agent id or name; `stream` supported | `chat.completion` (+ `riwaq` extension) |
 | GET | `/v1/models` | lists the org's agents as models | `{ object:'list', data:[...] }` |
+
+---
+
+## 5b. Output contract & formats
+
+One **canonical result** is the single source of truth; every wire format is a pure
+projection of it (`serializers.ts`). The provider is normalized away *before*
+serialization, so output structure depends only on *(canonical result × format)* —
+never on the backend.
+
+```
+provider (anthropic | openai | future) ─▶ complete()/streamText() ─▶ canonical ChatResult
+                                                                            │
+                                                            serializer ─────┤
+                                                                       native | openai | …
+```
+
+- **Canonical `ChatResult`** (`services/chat.ts`): `{ conversationId, answer, citations[],
+  model, usage, finishReason }` — no provider-specific fields. `finishReason` is normalized
+  (`stop | length | tool_use | content_filter | other`). Streaming uses canonical
+  `ChatStreamEvent`s (`meta → token* → done`).
+- **Native** is the first-party contract (our shape, in and out); **OpenAI** is a serializer
+  view, available as the dedicated `/v1/chat/completions` *or* `?format=openai` on the
+  native endpoint.
+- **Rule:** providers map *into* the canonical result; serializers map *out* of it. A new
+  provider = a new adapter (no output change); a new format = a new serializer branch (no
+  pipeline change). Existing clients can't break.
 
 ---
 

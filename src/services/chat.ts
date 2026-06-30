@@ -2,7 +2,7 @@ import { and, desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agents, conversations, messages } from '../db/schema'
 import { embedOne } from '../lib/embeddings'
-import type { ChatMessage, LlmConfig } from '../lib/llm'
+import { complete, streamText, type ChatMessage, type FinishReason, type LlmConfig } from '../lib/llm'
 import { searchChunks } from './retrieve'
 import { recallMemories } from './memory'
 import { resolveLlmConfig } from './llm-config'
@@ -40,6 +40,35 @@ export type PreparedTurn = {
   finalize: (answer: string, inputTokens: number, outputTokens: number) => Promise<void>
 }
 
+// One input shape for every entrypoint (native, OpenAI-compat, future adapters).
+export type ChatTurnInput = {
+  agent: Agent
+  endUserId: string
+  message: string
+  conversationId?: string
+  historyOverride?: ChatMessage[]
+  maxTokens?: number
+  temperature?: number
+}
+
+// THE canonical chat result. Every serializer (native / OpenAI / future) reads
+// only this — it carries no provider-specific fields, so the output structure is
+// independent of which backend produced it and stable as new backends are added.
+export type ChatResult = {
+  conversationId: string
+  answer: string
+  citations: Citation[]
+  model: string
+  usage: { inputTokens: number; outputTokens: number }
+  finishReason: FinishReason
+}
+
+// Canonical streaming events (provider- and format-agnostic).
+export type ChatStreamEvent =
+  | { type: 'meta'; conversationId: string; citations: Citation[]; model: string }
+  | { type: 'token'; text: string }
+  | { type: 'done'; result: ChatResult }
+
 /**
  * Shared chat pipeline used by both the native endpoint and the OpenAI-compatible
  * endpoint: resolve conversation → embed → retrieve + recall + history → build
@@ -49,13 +78,7 @@ export type PreparedTurn = {
  * `historyOverride` lets the OpenAI path supply turn history from the request
  * (the OpenAI contract is client-owned history) instead of loading it from the DB.
  */
-export async function prepareChatTurn(input: {
-  agent: Agent
-  endUserId: string
-  message: string
-  conversationId?: string
-  historyOverride?: ChatMessage[]
-}): Promise<PreparedTurn> {
+export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTurn> {
   const { agent, endUserId, message } = input
 
   // 1. Resolve or create the conversation (must belong to this agent).
@@ -133,6 +156,67 @@ export async function prepareChatTurn(input: {
   }
 
   return { conversationId, system, llmMessages, citations, llm, finalize }
+}
+
+/**
+ * Run a full non-streaming turn and return the canonical {@link ChatResult}.
+ * Serializers turn this into whatever wire format the caller asked for.
+ */
+export async function runChatTurn(input: ChatTurnInput): Promise<ChatResult> {
+  const { system, llmMessages, citations, conversationId, llm, finalize } = await prepareChatTurn(input)
+  const res = await complete({
+    config: llm,
+    system,
+    messages: llmMessages,
+    ...(input.maxTokens ? { maxTokens: input.maxTokens } : {}),
+    ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+  })
+  await finalize(res.text, res.inputTokens, res.outputTokens)
+  return {
+    conversationId,
+    answer: res.text,
+    citations,
+    model: llm.model,
+    usage: { inputTokens: res.inputTokens, outputTokens: res.outputTokens },
+    finishReason: res.finishReason,
+  }
+}
+
+/**
+ * Run a streaming turn, yielding canonical {@link ChatStreamEvent}s (meta → token*
+ * → done). Persistence + learning happen before the final `done` event. Serializers
+ * map these events to native SSE or OpenAI chunks.
+ */
+export async function* streamChatTurn(input: ChatTurnInput): AsyncGenerator<ChatStreamEvent> {
+  const { system, llmMessages, citations, conversationId, llm, finalize } = await prepareChatTurn(input)
+  yield { type: 'meta', conversationId, citations, model: llm.model }
+
+  let answer = ''
+  const s = streamText({
+    config: llm,
+    system,
+    messages: llmMessages,
+    ...(input.maxTokens ? { maxTokens: input.maxTokens } : {}),
+    ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+  })
+  for await (const token of s.tokens) {
+    answer += token
+    yield { type: 'token', text: token }
+  }
+  const done = await s.done
+  await finalize(answer, done.inputTokens, done.outputTokens)
+
+  yield {
+    type: 'done',
+    result: {
+      conversationId,
+      answer,
+      citations,
+      model: llm.model,
+      usage: { inputTokens: done.inputTokens, outputTokens: done.outputTokens },
+      finishReason: done.finishReason,
+    },
+  }
 }
 
 async function loadHistory(conversationId: string): Promise<ChatMessage[]> {

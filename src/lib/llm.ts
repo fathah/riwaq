@@ -8,7 +8,40 @@ export type Provider = 'anthropic' | 'openai'
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type Usage = { inputTokens: number; outputTokens: number }
-export type LLMResult = { text: string } & Usage
+
+// Normalized across providers so the output contract never depends on the backend.
+export type FinishReason = 'stop' | 'length' | 'tool_use' | 'content_filter' | 'other'
+export type LLMResult = { text: string; finishReason: FinishReason } & Usage
+
+function normalizeAnthropicStop(reason: string | null): FinishReason {
+  switch (reason) {
+    case 'end_turn':
+    case 'stop_sequence':
+      return 'stop'
+    case 'max_tokens':
+      return 'length'
+    case 'tool_use':
+      return 'tool_use'
+    default:
+      return reason ? 'other' : 'stop'
+  }
+}
+
+function normalizeOpenAIFinish(reason: string | null | undefined): FinishReason {
+  switch (reason) {
+    case 'stop':
+      return 'stop'
+    case 'length':
+      return 'length'
+    case 'tool_calls':
+    case 'function_call':
+      return 'tool_use'
+    case 'content_filter':
+      return 'content_filter'
+    default:
+      return 'stop'
+  }
+}
 
 // Fully-resolved LLM config for a single call (agent → org → .env already merged).
 export type LlmConfig = {
@@ -72,6 +105,7 @@ export async function complete(opts: CallOpts): Promise<LLMResult> {
       text: res.choices[0]?.message?.content ?? '',
       inputTokens: res.usage?.prompt_tokens ?? 0,
       outputTokens: res.usage?.completion_tokens ?? 0,
+      finishReason: normalizeOpenAIFinish(res.choices[0]?.finish_reason),
     }
   }
 
@@ -86,19 +120,25 @@ export async function complete(opts: CallOpts): Promise<LLMResult> {
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
     .map((b) => b.text)
     .join('')
-  return { text, inputTokens: res.usage.input_tokens, outputTokens: res.usage.output_tokens }
+  return {
+    text,
+    inputTokens: res.usage.input_tokens,
+    outputTokens: res.usage.output_tokens,
+    finishReason: normalizeAnthropicStop(res.stop_reason),
+  }
 }
 
-// Unified streaming handle: drain `tokens` for text deltas, then await `usage`.
-export type LLMStream = { tokens: AsyncGenerator<string>; usage: Promise<Usage> }
+// Unified streaming handle: drain `tokens` for text deltas, then await `done`.
+export type StreamDone = Usage & { finishReason: FinishReason }
+export type LLMStream = { tokens: AsyncGenerator<string>; done: Promise<StreamDone> }
 
 export function streamText(opts: CallOpts): LLMStream {
   return opts.config.provider === 'openai' ? openaiStream(opts) : anthropicStream(opts)
 }
 
 function anthropicStream(opts: CallOpts): LLMStream {
-  let resolve!: (u: Usage) => void
-  const usage = new Promise<Usage>((r) => (resolve = r))
+  let resolve!: (d: StreamDone) => void
+  const done = new Promise<StreamDone>((r) => (resolve = r))
   async function* tokens(): AsyncGenerator<string> {
     const s = anthropicClient(opts.config).messages.stream({
       model: opts.config.model,
@@ -113,14 +153,18 @@ function anthropicStream(opts: CallOpts): LLMStream {
       }
     }
     const final = await s.finalMessage()
-    resolve({ inputTokens: final.usage.input_tokens, outputTokens: final.usage.output_tokens })
+    resolve({
+      inputTokens: final.usage.input_tokens,
+      outputTokens: final.usage.output_tokens,
+      finishReason: normalizeAnthropicStop(final.stop_reason),
+    })
   }
-  return { tokens: tokens(), usage }
+  return { tokens: tokens(), done }
 }
 
 function openaiStream(opts: CallOpts): LLMStream {
-  let resolve!: (u: Usage) => void
-  const usage = new Promise<Usage>((r) => (resolve = r))
+  let resolve!: (d: StreamDone) => void
+  const done = new Promise<StreamDone>((r) => (resolve = r))
   async function* tokens(): AsyncGenerator<string> {
     const stream = await openaiClient(opts.config).chat.completions.create({
       model: opts.config.model,
@@ -130,15 +174,18 @@ function openaiStream(opts: CallOpts): LLMStream {
       stream: true,
       stream_options: { include_usage: true },
     })
-    let u: Usage = { inputTokens: 0, outputTokens: 0 }
+    let d: StreamDone = { inputTokens: 0, outputTokens: 0, finishReason: 'stop' }
     for await (const chunk of stream) {
       const delta = chunk.choices[0]?.delta?.content
       if (delta) yield delta
+      const fr = chunk.choices[0]?.finish_reason
+      if (fr) d.finishReason = normalizeOpenAIFinish(fr)
       if (chunk.usage) {
-        u = { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens }
+        d.inputTokens = chunk.usage.prompt_tokens
+        d.outputTokens = chunk.usage.completion_tokens
       }
     }
-    resolve(u)
+    resolve(d)
   }
-  return { tokens: tokens(), usage }
+  return { tokens: tokens(), done }
 }

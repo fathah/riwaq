@@ -1,13 +1,13 @@
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
-import { randomUUID } from 'node:crypto'
 import { and, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agents } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg } from '../db/guards'
-import { complete, streamText, type ChatMessage } from '../lib/llm'
-import { prepareChatTurn, ChatError, type Agent } from '../services/chat'
+import type { ChatMessage } from '../lib/llm'
+import { runChatTurn, streamChatTurn, ChatError, type Agent, type ChatTurnInput } from '../services/chat'
+import { serializeResult, createStreamSerializer } from '../serializers'
 import type { AppEnv } from '../types'
 
 // OpenAI-compatible surface. Point any OpenAI SDK at `<base>/v1`, use the org
@@ -103,14 +103,39 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
     content: textOf(m.content),
   }))
 
-  let prepared
-  try {
-    prepared = await prepareChatTurn({
-      agent,
-      endUserId: body.user || 'openai',
-      message,
-      historyOverride,
+  // OpenAI-in → canonical pipeline → OpenAI-out (same serializer the native route
+  // can opt into via ?format=openai). Output shape is identical regardless of which
+  // provider backs the agent.
+  const input: ChatTurnInput = {
+    agent,
+    endUserId: body.user || 'openai',
+    message,
+    historyOverride,
+    ...(body.max_tokens ? { maxTokens: body.max_tokens } : {}),
+    ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
+  }
+
+  if (body.stream) {
+    const ser = createStreamSerializer('openai', {
+      model: body.model,
+      includeUsage: !!body.stream_options?.include_usage,
     })
+    return streamSSE(c, async (sse) => {
+      try {
+        for await (const ev of streamChatTurn(input)) {
+          for (const frame of ser.frames(ev)) await sse.writeSSE(frame)
+        }
+      } catch (err) {
+        const msg = err instanceof ChatError ? err.message : 'internal error'
+        await sse.writeSSE({ data: JSON.stringify({ error: { message: msg, type: 'invalid_request_error' } }) })
+        await sse.writeSSE({ data: '[DONE]' })
+      }
+    })
+  }
+
+  try {
+    const result = await runChatTurn(input)
+    return c.json(serializeResult(result, 'openai', body.model) as object)
   } catch (err) {
     if (err instanceof ChatError) {
       const e = oaiError(err.message, err.status as 400 | 404, 'invalid_request')
@@ -118,90 +143,4 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
     }
     throw err
   }
-
-  const { system, llmMessages, citations, conversationId, llm, finalize } = prepared
-  const id = 'chatcmpl-' + randomUUID().replace(/-/g, '')
-  const created = Math.floor(Date.now() / 1000)
-  const callOpts = {
-    config: llm,
-    system,
-    messages: llmMessages,
-    ...(body.max_tokens ? { maxTokens: body.max_tokens } : {}),
-    ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
-  }
-
-  // Streaming: OpenAI chat.completion.chunk frames, terminated by `[DONE]`.
-  if (body.stream) {
-    return streamSSE(c, async (sse) => {
-      await sse.writeSSE({
-        data: JSON.stringify({
-          id,
-          object: 'chat.completion.chunk',
-          created,
-          model: body.model,
-          choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
-        }),
-      })
-
-      let answer = ''
-      const s = streamText(callOpts)
-      for await (const token of s.tokens) {
-        answer += token
-        await sse.writeSSE({
-          data: JSON.stringify({
-            id,
-            object: 'chat.completion.chunk',
-            created,
-            model: body.model,
-            choices: [{ index: 0, delta: { content: token }, finish_reason: null }],
-          }),
-        })
-      }
-      const usage = await s.usage
-
-      await sse.writeSSE({
-        data: JSON.stringify({
-          id,
-          object: 'chat.completion.chunk',
-          created,
-          model: body.model,
-          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-          ...(body.stream_options?.include_usage
-            ? {
-                usage: {
-                  prompt_tokens: usage.inputTokens,
-                  completion_tokens: usage.outputTokens,
-                  total_tokens: usage.inputTokens + usage.outputTokens,
-                },
-              }
-            : {}),
-          // Non-standard extension: retrieval sources + conversation handle.
-          riwaq: { conversationId, citations },
-        }),
-      })
-      await sse.writeSSE({ data: '[DONE]' })
-      await finalize(answer, usage.inputTokens, usage.outputTokens)
-    })
-  }
-
-  // Non-streaming.
-  const { text: answer, inputTokens, outputTokens } = await complete(callOpts)
-  await finalize(answer, inputTokens, outputTokens)
-
-  return c.json({
-    id,
-    object: 'chat.completion',
-    created,
-    model: body.model,
-    choices: [
-      { index: 0, message: { role: 'assistant', content: answer }, finish_reason: 'stop' },
-    ],
-    usage: {
-      prompt_tokens: inputTokens,
-      completion_tokens: outputTokens,
-      total_tokens: inputTokens + outputTokens,
-    },
-    // Non-standard extension: OpenAI clients ignore unknown fields.
-    riwaq: { conversationId, citations },
-  })
 })

@@ -10,7 +10,10 @@ Provider-agnostic on both sides:
 
 - **Outbound** — each agent runs on Anthropic Claude **or any OpenAI-compatible endpoint**
   (OpenAI, OpenRouter, Groq, Together, local Ollama/vLLM/LM Studio…).
-- **Inbound** — exposes an **OpenAI-compatible API** so any OpenAI client can talk to your agents.
+- **Inbound** — one canonical response contract (Riwaq's own), with a serializer that
+  also speaks **OpenAI** (`/v1/chat/completions`, or `?format=openai`). The output shape
+  is identical no matter which provider backs the agent, and stays stable as new
+  backends/formats are added.
 
 Docker-first, API-first. The full design lives in [plan.md](plan.md).
 
@@ -95,8 +98,9 @@ curl -sX POST $B/agents/$AGENT/documents -H "authorization: Bearer $KEY" -F file
 curl -sX POST $B/agents/$AGENT/chat -H "authorization: Bearer $KEY" \
   -H 'content-type: application/json' \
   -d '{"endUserId":"u_123","message":"What is the refund window?"}'
-# → { "answer": "...", "citations": [...], "conversationId": "..." }
+# → { conversationId, answer, citations:[...], model, usage, finishReason }   (canonical shape)
 #   add ?stream=1 for SSE (events: meta → token → done)
+#   add ?format=openai to get the OpenAI chat.completion shape from this same endpoint
 
 # 5. Feedback on an assistant message
 curl -sX POST $B/messages/<messageId>/feedback -H "authorization: Bearer $KEY" \
@@ -163,11 +167,30 @@ linked to agents in the same org.
 
 ---
 
+## Output formats
+
+There is **one canonical result** internally; every wire format is a pure projection of
+it (`src/serializers.ts`). The provider is normalized away *before* serialization, so a
+Claude-backed and a GPT-backed agent return byte-identical structure.
+
+```
+provider (anthropic | openai | future) ─▶ canonical ChatResult ─▶ serializer ─▶ native | openai
+```
+
+- **Native** (default) — Riwaq's own shape: `{ conversationId, answer, citations, model, usage, finishReason }`.
+  This is the stable, first-party contract you build against.
+- **OpenAI** — request it two ways:
+  - the dedicated endpoint `POST /v1/chat/completions` (OpenAI in, OpenAI out), or
+  - `?format=openai` on the native endpoint (native in, OpenAI out).
+
+Adding a new output format later = one branch in the serializer; the pipeline and the
+canonical result don't change, so existing clients never break.
+
 ## OpenAI-compatible API (inbound)
 
-> This is the **inbound** side — Riwaq _speaking_ the OpenAI protocol to clients. It's
-> independent of which provider an agent uses _outbound_; a Claude-backed agent is still
-> reachable here.
+> This is the **inbound** side — Riwaq _speaking_ the OpenAI protocol to clients. It's the
+> OpenAI projection of the same canonical result, and is independent of which provider an
+> agent uses _outbound_; a Claude-backed agent is still reachable here.
 
 Point any OpenAI client at `http://localhost:3000/v1`, use your **org API key** as the
 OpenAI key, and pass the **agent id or name** as `model`. The same RAG + memory +
@@ -224,7 +247,7 @@ Works out of the box with the `openai` SDKs, LangChain, OpenWebUI, LibreChat, an
 | POST   | `/agents/:id/documents`                   | convenience: upload into the agent's private KB                                   |
 | GET    | `/knowledge-bases/:kbId/documents`        | list documents (with status)                                                      |
 | DELETE | `/knowledge-bases/:kbId/documents/:docId` | delete (cascades to chunks)                                                       |
-| POST   | `/agents/:id/chat`                        | `{ endUserId, message, conversationId? }`; `?stream=1` for SSE                    |
+| POST   | `/agents/:id/chat`                        | `{ endUserId, message, conversationId? }`; `?stream=1` SSE; `?format=openai`      |
 | POST   | `/messages/:id/feedback`                  | `{ rating: "up" \| "down" }`                                                      |
 | GET    | `/agents/:id/analytics/top-questions`     | most-asked topics                                                                 |
 | POST   | `/v1/chat/completions`                    | OpenAI-compatible; `model` = agent id/name; `stream` supported                    |
