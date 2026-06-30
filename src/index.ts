@@ -10,6 +10,7 @@ import { agentsRoute } from './routes/agents'
 import { knowledgeBasesRoute } from './routes/knowledge-bases'
 import { documentsRoute } from './routes/documents'
 import { chatRoute } from './routes/chat'
+import { openaiRoute } from './routes/openai'
 import { feedbackRoute } from './routes/feedback'
 import { analyticsRoute } from './routes/analytics'
 
@@ -33,6 +34,7 @@ app.route('/', agentsRoute)
 app.route('/', knowledgeBasesRoute)
 app.route('/', documentsRoute)
 app.route('/', chatRoute)
+app.route('/', openaiRoute)
 app.route('/', feedbackRoute)
 app.route('/', analyticsRoute)
 

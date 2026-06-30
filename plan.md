@@ -123,10 +123,12 @@ riwaq/
     │   ├── agents.ts
     │   ├── knowledge-bases.ts  # create/list KBs; attach/detach to agents
     │   ├── documents.ts        # upload into a KB
-    │   ├── chat.ts
+    │   ├── chat.ts             # native POST /agents/:id/chat
+    │   ├── openai.ts           # OpenAI-compatible /v1/chat/completions + /v1/models
     │   ├── feedback.ts
     │   └── analytics.ts
     ├── services/
+    │   ├── chat.ts             # prepareChatTurn — shared pipeline (native + OpenAI)
     │   ├── ingest.ts           # parse → chunk → embed → store (into a KB)
     │   ├── retrieve.ts         # resolve agent's KB set → top-k across them
     │   ├── memory.ts           # recall + extraction/upsert (per-agent)
@@ -172,6 +174,44 @@ riwaq/
 | POST | `/messages/:id/feedback` | `{ rating: "up" \| "down" }` | `{ ok }` |
 | GET | `/agents/:id/analytics/top-questions` | per-agent | `[{ label, count, lastSeen }]` |
 | GET | `/health` | DB ping | `{ ok }` |
+
+**OpenAI-compatible (inbound)**
+| Method | Path | Body / Notes | Returns |
+|--------|------|--------------|---------|
+| POST | `/v1/chat/completions` | OpenAI chat shape; `model` = agent id or name; `stream` supported | `chat.completion` (+ `riwaq` extension) |
+| GET | `/v1/models` | lists the org's agents as models | `{ object:'list', data:[...] }` |
+
+---
+
+## 5a. OpenAI-compatible API
+
+Lets any OpenAI client/tool (the `openai` SDKs, LangChain, OpenWebUI, LibreChat…)
+drive a Riwaq agent with **zero custom code** — it's an adapter over the same
+`prepareChatTurn` pipeline the native `/agents/:id/chat` uses, so RAG + memory +
+topic learning all run identically.
+
+- **Base URL:** `<host>/v1`. **Auth:** org API key sent as the OpenAI `api_key`
+  (`Authorization: Bearer …`) — resolved by the same `orgAuth` middleware.
+- **Agent selection:** the OpenAI `model` field = the agent **id (uuid)** or its
+  **name** within the org. The underlying Claude model is the agent's own `model`.
+- **History is client-owned:** the request's `messages` array is the turn history
+  (OpenAI contract). The last `user` message is the RAG query; earlier user/assistant
+  messages become history. Each call still persists to a conversation + runs the
+  async learning loop, so memory/topics accumulate per agent + `user`.
+- **Client `system` messages are ignored** — the agent's own system prompt and the
+  grounding rule stay authoritative (prevents callers from overriding safety).
+- **Streaming:** `stream:true` emits standard `chat.completion.chunk` frames ending
+  in `[DONE]`; `stream_options.include_usage` adds a usage frame.
+- **Extension field:** responses carry a non-standard `riwaq: { conversationId,
+  citations[] }` alongside the standard payload (OpenAI clients ignore unknown keys),
+  so retrieval sources remain available without breaking compatibility.
+
+```
+POST /v1/chat/completions
+{ "model": "<agentId|agentName>",
+  "messages": [{"role":"user","content":"…"}],
+  "user": "u_123", "stream": false }
+```
 
 ---
 

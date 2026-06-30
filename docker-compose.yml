@@ -6,7 +6,9 @@ services:
       POSTGRES_PASSWORD: riwaq
       POSTGRES_DB: riwaq
     ports:
-      - "5432:5432"
+      # Host 5433 to avoid clashing with a local Postgres on 5432. The API talks
+      # to the DB over the compose network (db:5432), so this only affects host tools.
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
