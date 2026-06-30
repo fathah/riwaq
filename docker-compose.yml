@@ -1,0 +1,36 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: riwaq
+      POSTGRES_PASSWORD: riwaq
+      POSTGRES_DB: riwaq
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U riwaq -d riwaq"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://riwaq:riwaq@db:5432/riwaq
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY}
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    # Dev convenience: live-reload against local source.
+    command: npm run dev
+    volumes:
+      - ./src:/app/src
+
+volumes:
+  pgdata:
