@@ -1,27 +1,30 @@
 import { Hono } from 'hono'
-import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import { eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { organizations } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
+import { generateApiKey, hashApiKey, apiKeyPrefix } from '../lib/api-key'
+import { assertPublicUrl, UnsafeUrlError } from '../lib/url-guard'
+import { env } from '../env'
 import type { AppEnv } from '../types'
 
 export const organizationsRoute = new Hono<AppEnv>()
 
-const createSchema = z.object({ name: z.string().min(1) })
+const createSchema = z.object({ name: z.string().min(1).max(200) })
 
 // PUBLIC: bootstrap an org. Returns the API key ONCE — store it; it's the only
-// way to authenticate every subsequent request for this tenant.
+// way to authenticate every subsequent request for this tenant. The DB keeps only
+// the key's hash, so this is the sole moment the raw key exists.
 organizationsRoute.post('/organizations', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const parsed = createSchema.safeParse(body)
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
 
-  const apiKey = 'riwaq_' + randomBytes(24).toString('hex')
+  const apiKey = generateApiKey()
   const [org] = await db
     .insert(organizations)
-    .values({ name: parsed.data.name, apiKey })
+    .values({ name: parsed.data.name, apiKeyHash: hashApiKey(apiKey), apiKeyPrefix: apiKeyPrefix(apiKey) })
     .returning({ id: organizations.id, name: organizations.name, createdAt: organizations.createdAt })
 
   return c.json({ ...org!, apiKey }, 201)
@@ -71,6 +74,20 @@ organizationsRoute.put('/organizations/llm', orgAuth, async (c) => {
   const orgId = c.get('orgId')
   const parsed = llmSchema.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
+
+  // SSRF: a tenant-supplied baseUrl becomes server-side egress, so validate it
+  // before storing — reject loopback/private/link-local/metadata and non-https.
+  if (parsed.data.baseUrl) {
+    try {
+      await assertPublicUrl(parsed.data.baseUrl, {
+        allowInsecure: env.ALLOW_INSECURE_LLM_URLS,
+        allowedHosts: env.LLM_ALLOWED_HOSTS,
+      })
+    } catch (err) {
+      if (err instanceof UnsafeUrlError) return c.json({ error: `baseUrl rejected: ${err.message}` }, 400)
+      throw err
+    }
+  }
 
   const patch: Record<string, string | null> = {}
   if ('provider' in parsed.data) patch.llmProvider = parsed.data.provider ?? null

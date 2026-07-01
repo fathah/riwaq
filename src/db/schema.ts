@@ -19,7 +19,10 @@ export const EMBEDDING_DIM = env.EMBEDDING_DIM
 export const organizations = pgTable('organizations', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
-  apiKey: text('api_key').notNull().unique(),
+  // Auth: only a SHA-256 hash of the API key is stored (never the raw key). The
+  // prefix is a non-secret display aid ("riwaq_1a2b…"). Raw key shown once, at creation.
+  apiKeyHash: text('api_key_hash').notNull().unique(),
+  apiKeyPrefix: text('api_key_prefix'),
   // Per-org LLM overrides. Each is nullable → falls back to the .env default.
   llmProvider: text('llm_provider'), // 'anthropic' | 'openai'
   llmBaseUrl: text('llm_base_url'), // OpenAI-compatible base URL
@@ -49,10 +52,15 @@ export const knowledgeBases = pgTable('knowledge_bases', {
   name: text('name').notNull(),
   // true = the private KB auto-created for a single agent.
   isDefault: boolean('is_default').notNull().default(false),
+  // Owner of a private KB (null for shared KBs). DB constraints enforce exactly
+  // one private KB per agent and that private ⇔ owner-present. See 0003.
+  agentId: uuid('agent_id').references(() => agents.id, { onDelete: 'cascade' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
-// M:N link between agents and the KBs they can read.
+// M:N link between agents and the KBs they can read. `orgId` is carried and
+// tied to both sides by composite FKs (see 0004), so a cross-org link is
+// impossible at the database level, not just discouraged by route guards.
 export const agentKnowledgeBases = pgTable(
   'agent_knowledge_bases',
   {
@@ -62,6 +70,7 @@ export const agentKnowledgeBases = pgTable(
     knowledgeBaseId: uuid('knowledge_base_id')
       .notNull()
       .references(() => knowledgeBases.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id').notNull(),
   },
   (t) => [primaryKey({ columns: [t.agentId, t.knowledgeBaseId] })],
 )

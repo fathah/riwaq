@@ -47,7 +47,9 @@ Nothing ever crosses an organization boundary.
 
 ```bash
 cp .env.example .env
-# set ANTHROPIC_API_KEY and EMBEDDINGS_API_KEY (Voyage AI) in .env
+# Set an LLM: ANTHROPIC_API_KEY, or OPENAI_API_KEY + OPENAI_BASE_URL for any
+# OpenAI-compatible endpoint (OpenAI, Groq, OpenRouter, Ollama…). Embeddings work
+# out of the box with no key (offline local model); see "Embeddings" below.
 docker compose up --build
 ```
 
@@ -166,6 +168,26 @@ Now `$AGENT` retrieves across **its private KB + the shared KB**. A shared KB ca
 linked to agents in the same org.
 
 ---
+
+## Embeddings
+
+Pluggable, with an **offline fallback** so it runs with no API key:
+
+| Provider | Set `EMBEDDINGS_PROVIDER` | Needs | Default model (dim) |
+|---|---|---|---|
+| **local** (default fallback) | `local` | nothing — in-process, offline | `all-MiniLM-L6-v2` (384) |
+| **voyage** | `voyage` | `EMBEDDINGS_API_KEY` | `voyage-3` (1024) |
+| **openai-compatible** | `openai` | `EMBEDDINGS_API_KEY` + `EMBEDDINGS_BASE_URL` | `text-embedding-3-small` |
+
+If `EMBEDDINGS_PROVIDER` is unset: uses **voyage** when `EMBEDDINGS_API_KEY` is set,
+otherwise the **local** offline model (one-time ~23 MB download, then cached). The
+`openai` provider points at any `/v1/embeddings` server — OpenAI, a local Ollama, or
+LM Studio.
+
+> **Dimension is locked at first migration** via `EMBEDDING_DIM` (default 384, matching
+> the local model). All providers must emit that dimension — OpenAI's `text-embedding-3-*`
+> can via its `dimensions` param; Voyage needs `EMBEDDING_DIM=1024`. Changing it later
+> means re-creating the vectors.
 
 ## Output formats
 
@@ -298,7 +320,8 @@ src/
 
 TypeScript · [Hono](https://hono.dev) · Postgres + [pgvector](https://github.com/pgvector/pgvector) ·
 [Drizzle ORM](https://orm.drizzle.team) · LLM via Anthropic Claude **or** any
-OpenAI-compatible endpoint (per agent) · Voyage AI embeddings (`voyage-3`, 1024-d).
+OpenAI-compatible endpoint (per agent) · embeddings via Voyage, an OpenAI-compatible
+endpoint, **or** a local offline model (transformers.js) — no key required.
 
 ## Configuration
 
@@ -309,7 +332,10 @@ OpenAI-compatible endpoint (per agent) · Voyage AI embeddings (`voyage-3`, 1024
 | `OPENAI_API_KEY`       | for `openai` agents    | Key for the OpenAI-compatible endpoint                                  |
 | `OPENAI_BASE_URL`      | no                     | OpenAI-compatible base URL (default `https://api.openai.com/v1`)        |
 | `LLM_DEFAULT_PROVIDER` | no                     | `anthropic` (default) or `openai` — used when an agent omits `provider` |
-| `EMBEDDINGS_API_KEY`   | for ingest/chat        | Voyage AI key                                                           |
+| `EMBEDDINGS_PROVIDER`  | no                     | `voyage` \| `openai` \| `local`. Unset → voyage if key set, else local  |
+| `EMBEDDINGS_API_KEY`   | for voyage/openai      | embeddings key (not needed for `local`)                                 |
+| `EMBEDDINGS_BASE_URL`  | no                     | `/v1` server for the `openai` embeddings provider                       |
+| `EMBEDDING_DIM`        | no                     | vector dimension, locked at first migration (default 384)               |
 | `PORT`                 | no                     | HTTP port (default 3000)                                                |
 
 ## Development

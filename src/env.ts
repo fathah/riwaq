@@ -27,7 +27,33 @@ const schema = z.object({
   // first migration — changing it later requires re-creating vectors.
   EMBEDDING_DIM: z.coerce.number().int().positive().default(384),
 
+  // --- Safety / limits ---
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  // SSRF: optional allowlist of hostnames a tenant may use for LLM/embedding
+  // egress (comma-separated). Empty → any public host allowed (private/reserved
+  // IPs are always blocked). Set this in production to lock egress to known providers.
+  LLM_ALLOWED_HOSTS: z
+    .string()
+    .default('')
+    .transform((s) => s.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean)),
+  // Permit http:// (not just https) for tenant LLM URLs — local dev only.
+  ALLOW_INSECURE_LLM_URLS: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('0')
+    .transform((v) => v === '1' || v === 'true'),
+  // Max accepted request body size in bytes (protects parsing + memory). Default 10 MB.
+  MAX_BODY_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+
+  // --- Retrieval tuning ---
+  // Drop retrieved chunks below this cosine similarity (0..1). 0 = keep all.
+  // Calibrate per embedding model; left off by default so behavior never regresses.
+  RETRIEVAL_MIN_SIMILARITY: z.coerce.number().min(0).max(1).default(0),
+  // Cap total characters of retrieved context injected into the prompt (token budget guard).
+  RETRIEVAL_CHAR_BUDGET: z.coerce.number().int().positive().default(12_000),
+
   PORT: z.coerce.number().default(3000),
 })
 
 export const env = schema.parse(process.env)
+
+export const isProd = env.NODE_ENV === 'production'

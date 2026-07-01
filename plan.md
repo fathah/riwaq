@@ -96,9 +96,12 @@ extract memory, classify topic, update counters) runs *after* the response is se
   - Both backends sit behind one `complete()` / `streamText()` interface in `lib/llm.ts`
     (unified streaming), so the chat pipeline, memory extraction, and topic labeling are
     provider-blind. Clients are cached per (baseURL, apiKey).
-- **Embeddings:** Voyage AI `voyage-3` (Anthropic's recommended partner), **1024 dims**,
-  via REST. `vector(1024)` columns are locked to this. An `EmbeddingProvider` interface
-  keeps OpenAI `text-embedding-3-small` (1536) swappable — never mix dims in one DB.
+- **Embeddings (pluggable, offline fallback):** `voyage` (REST), `openai` (any
+  `/v1/embeddings` server — OpenAI, Ollama, LM Studio), or `local` (in-process
+  transformers.js, offline, no key — default `all-MiniLM-L6-v2`, 384-d). Unset provider
+  → voyage if a key is set, else local. `EMBEDDING_DIM` is templated into the vector
+  columns at migration time (default 384) and every provider must emit that dim
+  (OpenAI via its `dimensions` param; Voyage = 1024). Never mix dims in one DB.
 - **File parsing (start small):** PDF (`pdf-parse`), TXT, MD. Later: DOCX (`mammoth`), CSV.
 - **Validation:** `zod` on every endpoint body.
 - **Background jobs (v1):** in-process fire-and-forget. Upgrade path: BullMQ + Redis.

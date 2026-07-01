@@ -52,7 +52,7 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     const result = await runChatTurn(input)
     return c.json(serializeResult(result, format, agent.id) as object)
   } catch (err) {
-    if (err instanceof ChatError) return c.json({ error: err.message }, err.status as 400 | 404)
+    if (err instanceof ChatError) return c.json({ error: err.message }, err.status as 400 | 403 | 404)
     throw err
   }
 })

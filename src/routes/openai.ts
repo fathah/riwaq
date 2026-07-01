@@ -17,7 +17,7 @@ openaiRoute.use('*', orgAuth)
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-function oaiError(message: string, status: 400 | 401 | 404, code: string) {
+function oaiError(message: string, status: 400 | 401 | 403 | 404, code: string) {
   return { _status: status, body: { error: { message, type: 'invalid_request_error', code } } }
 }
 
@@ -138,7 +138,7 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
     return c.json(serializeResult(result, 'openai', body.model) as object)
   } catch (err) {
     if (err instanceof ChatError) {
-      const e = oaiError(err.message, err.status as 400 | 404, 'invalid_request')
+      const e = oaiError(err.message, err.status as 400 | 403 | 404, 'invalid_request')
       return c.json(e.body, e._status)
     }
     throw err

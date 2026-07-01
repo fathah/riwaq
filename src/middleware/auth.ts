@@ -2,6 +2,7 @@ import { createMiddleware } from 'hono/factory'
 import { eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { organizations } from '../db/schema'
+import { hashApiKey } from '../lib/api-key'
 import type { AppEnv } from '../types'
 
 // Resolves the request's API key to an org and pins `orgId` on the context.
@@ -15,10 +16,11 @@ export const orgAuth = createMiddleware<AppEnv>(async (c, next) => {
     return c.json({ error: 'missing API key (use Authorization: Bearer <key>)' }, 401)
   }
 
+  // Look up by hash — the raw key is never stored, so we can't (and needn't) compare it.
   const [org] = await db
     .select({ id: organizations.id })
     .from(organizations)
-    .where(eq(organizations.apiKey, key))
+    .where(eq(organizations.apiKeyHash, hashApiKey(key)))
     .limit(1)
 
   if (!org) return c.json({ error: 'invalid API key' }, 401)

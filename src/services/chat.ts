@@ -81,15 +81,20 @@ export type ChatStreamEvent =
 export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTurn> {
   const { agent, endUserId, message } = input
 
-  // 1. Resolve or create the conversation (must belong to this agent).
+  // 1. Resolve or create the conversation. It must belong to this agent AND to
+  // the same end user. A caller-supplied conversationId is NOT proof of identity,
+  // so we compare the stored endUserId and refuse a mismatch — otherwise one user
+  // could resume another user's conversation (and mis-attribute new memories).
   let conversationId = input.conversationId
   if (conversationId) {
     const [conv] = await db
-      .select({ id: conversations.id })
+      .select({ id: conversations.id, endUserId: conversations.endUserId })
       .from(conversations)
       .where(and(eq(conversations.id, conversationId), eq(conversations.agentId, agent.id)))
       .limit(1)
     if (!conv) throw new ChatError('conversation not found', 404)
+    if (conv.endUserId !== endUserId)
+      throw new ChatError('conversation does not belong to this end user', 403)
   } else {
     const [conv] = await db
       .insert(conversations)
@@ -107,7 +112,7 @@ export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTur
   // 3 + 4. Retrieve knowledge + recall memory (+ history if not overridden).
   const [retrieved, memoryFacts, dbHistory] = await Promise.all([
     searchChunks(agent.id, queryEmbedding, TOP_K),
-    recallMemories(agent.id, queryEmbedding),
+    recallMemories(agent.id, endUserId, queryEmbedding),
     input.historyOverride ? Promise.resolve([] as ChatMessage[]) : loadHistory(conversationId),
   ])
   const history = input.historyOverride ?? dbHistory

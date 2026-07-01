@@ -21,37 +21,43 @@ export async function classifyQuestion(opts: {
 }): Promise<string> {
   const similarity = sql<number>`1 - (${cosineDistance(topics.centroid, opts.embedding)})`
   const [nearest] = await db
-    .select({ id: topics.id, count: topics.count, similarity })
+    .select({ id: topics.id, similarity })
     .from(topics)
     .where(eq(topics.agentId, opts.agentId))
     .orderBy(desc(similarity))
     .limit(1)
 
-  let topicId: string
+  // Label the new cluster (external LLM call) BEFORE the transaction so we don't
+  // hold it open across the network.
+  const label =
+    nearest && nearest.similarity >= MATCH_THRESHOLD ? null : await labelQuestion(opts.question, opts.llm)
 
-  if (nearest && nearest.similarity >= MATCH_THRESHOLD) {
-    await db
-      .update(topics)
-      .set({ count: nearest.count + 1, lastSeen: new Date() })
-      .where(eq(topics.id, nearest.id))
-    topicId = nearest.id
-  } else {
-    const label = await labelQuestion(opts.question, opts.llm)
-    const [created] = await db
-      .insert(topics)
-      .values({ agentId: opts.agentId, label, centroid: opts.embedding, count: 1 })
-      .returning({ id: topics.id })
-    topicId = created!.id
-  }
+  // Assignment + log write in one transaction; the counter uses an atomic
+  // `count = count + 1` (not read-then-write), so concurrent questions can't lose counts.
+  return db.transaction(async (tx) => {
+    let topicId: string
+    if (nearest && nearest.similarity >= MATCH_THRESHOLD) {
+      await tx
+        .update(topics)
+        .set({ count: sql`${topics.count} + 1`, lastSeen: new Date() })
+        .where(eq(topics.id, nearest.id))
+      topicId = nearest.id
+    } else {
+      const [created] = await tx
+        .insert(topics)
+        .values({ agentId: opts.agentId, label: label ?? 'Uncategorized', centroid: opts.embedding, count: 1 })
+        .returning({ id: topics.id })
+      topicId = created!.id
+    }
 
-  await db.insert(questionLogs).values({
-    agentId: opts.agentId,
-    messageId: opts.messageId,
-    topicId,
-    embedding: opts.embedding,
+    await tx.insert(questionLogs).values({
+      agentId: opts.agentId,
+      messageId: opts.messageId,
+      topicId,
+      embedding: opts.embedding,
+    })
+    return topicId
   })
-
-  return topicId
 }
 
 async function labelQuestion(question: string, llm: LlmConfig): Promise<string> {

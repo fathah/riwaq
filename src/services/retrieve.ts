@@ -1,6 +1,7 @@
 import { eq, inArray, desc, sql, cosineDistance } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agentKnowledgeBases, chunks, documents, knowledgeBases } from '../db/schema'
+import { env } from '../env'
 
 export type RetrievedChunk = {
   id: string
@@ -35,7 +36,7 @@ export async function searchChunks(
 
   const similarity = sql<number>`1 - (${cosineDistance(chunks.embedding, queryEmbedding)})`
 
-  return db
+  const rows = await db
     .select({
       id: chunks.id,
       content: chunks.content,
@@ -51,4 +52,18 @@ export async function searchChunks(
     .where(inArray(chunks.knowledgeBaseId, kbIds))
     .orderBy(desc(similarity))
     .limit(k)
+
+  // Post-filter: drop weakly-relevant chunks (reduces cost + prompt-injection
+  // surface), then pack under a character budget so the prompt can't grow
+  // unbounded. Threshold defaults off (0) so retrieval never regresses until tuned.
+  const out: RetrievedChunk[] = []
+  let budget = env.RETRIEVAL_CHAR_BUDGET
+  for (const r of rows) {
+    if (r.similarity < env.RETRIEVAL_MIN_SIMILARITY) continue
+    if (out.length > 0 && r.content.length > budget) continue // always keep the top hit
+    out.push(r)
+    budget -= r.content.length
+    if (budget <= 0) break
+  }
+  return out
 }

@@ -1,4 +1,4 @@
-import { and, eq, desc, sql, cosineDistance } from 'drizzle-orm'
+import { and, eq, desc, isNull, or, sql, cosineDistance } from 'drizzle-orm'
 import { db } from '../db/client'
 import { memories } from '../db/schema'
 import { embed } from '../lib/embeddings'
@@ -8,13 +8,23 @@ import { MEMORY_EXTRACT_SYSTEM, memoryExtractUser } from '../prompts/memory-extr
 const RECALL_K = 5
 const DEDUP_SIMILARITY = 0.92 // near-identical facts are merged, not duplicated
 
-/** Top long-term memories for an agent, by relevance to the current query. */
-export async function recallMemories(agentId: string, queryEmbedding: number[], k = RECALL_K): Promise<string[]> {
+/**
+ * Top long-term memories to inject for THIS end user of an agent: facts learned
+ * from this same user, plus agent-wide facts (endUserId IS NULL). Facts about a
+ * different end user are never recalled — that would leak one user's data into
+ * another user's prompt. Scoping is by (agentId, endUserId), not agentId alone.
+ */
+export async function recallMemories(
+  agentId: string,
+  endUserId: string,
+  queryEmbedding: number[],
+  k = RECALL_K,
+): Promise<string[]> {
   const similarity = sql<number>`1 - (${cosineDistance(memories.embedding, queryEmbedding)})`
   const rows = await db
     .select({ fact: memories.fact, similarity })
     .from(memories)
-    .where(eq(memories.agentId, agentId))
+    .where(and(eq(memories.agentId, agentId), or(eq(memories.endUserId, endUserId), isNull(memories.endUserId))))
     .orderBy(desc(similarity))
     .limit(k)
   return rows.map((r) => r.fact)
@@ -49,10 +59,13 @@ export async function extractAndStoreMemories(opts: {
 
 async function upsertMemory(agentId: string, endUserId: string, fact: string, embedding: number[]): Promise<void> {
   const similarity = sql<number>`1 - (${cosineDistance(memories.embedding, embedding)})`
+  // Deduplicate only against THIS user's own facts. Scoping by agent alone would
+  // let one user's near-identical fact suppress (refresh instead of insert)
+  // another user's — corrupting per-user memory.
   const [nearest] = await db
     .select({ id: memories.id, similarity })
     .from(memories)
-    .where(eq(memories.agentId, agentId))
+    .where(and(eq(memories.agentId, agentId), eq(memories.endUserId, endUserId)))
     .orderBy(desc(similarity))
     .limit(1)
 

@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   document_id       uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   knowledge_base_id uuid NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
   content           text NOT NULL,
-  embedding         vector(1024) NOT NULL,
+  embedding         vector(__EMBED_DIM__) NOT NULL,
   metadata          jsonb NOT NULL DEFAULT '{}',
   created_at        timestamptz NOT NULL DEFAULT now()
 );
@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS memories (
   agent_id    uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   end_user_id text,
   fact        text NOT NULL,
-  embedding   vector(1024) NOT NULL,
+  embedding   vector(__EMBED_DIM__) NOT NULL,
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS topics (
   id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   agent_id  uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   label     text NOT NULL,
-  centroid  vector(1024) NOT NULL,
+  centroid  vector(__EMBED_DIM__) NOT NULL,
   count     integer NOT NULL DEFAULT 0,
   last_seen timestamptz NOT NULL DEFAULT now()
 );
@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS question_logs (
   agent_id   uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   message_id uuid NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
   topic_id   uuid REFERENCES topics(id) ON DELETE SET NULL,
-  embedding  vector(1024) NOT NULL,
+  embedding  vector(__EMBED_DIM__) NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 

@@ -16,7 +16,7 @@ function resolveProvider(): EmbeddingsProvider {
 const DEFAULT_MODEL: Record<EmbeddingsProvider, string> = {
   voyage: 'voyage-3',
   openai: 'text-embedding-3-small',
-  local: 'Xenova/bge-small-en-v1.5', // 384-dim, ~30MB quantized
+  local: 'Xenova/all-MiniLM-L6-v2', // 384-dim, ~23MB; the canonical transformers.js embedder
 }
 
 function modelFor(provider: EmbeddingsProvider): string {
@@ -60,6 +60,10 @@ export async function embedOne(text: string, inputType: InputType = 'query'): Pr
   return v
 }
 
+// Bound every remote embedding call so a slow/hanging provider can't wedge an
+// ingest or chat turn indefinitely.
+const FETCH_TIMEOUT_MS = 30_000
+
 // ---- voyage (REST) ----
 const VOYAGE_URL = 'https://api.voyageai.com/v1/embeddings'
 const VOYAGE_BATCH = 128
@@ -73,6 +77,7 @@ async function voyageEmbed(texts: string[], inputType: InputType): Promise<numbe
       method: 'POST',
       headers: { Authorization: `Bearer ${env.EMBEDDINGS_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: modelFor('voyage'), input: slice, input_type: inputType }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     })
     if (!res.ok) throw new Error(`Voyage embeddings error ${res.status}: ${await res.text()}`)
     const json = (await res.json()) as { data: { embedding: number[] }[] }
@@ -90,6 +95,7 @@ async function openaiEmbed(texts: string[]): Promise<number[][]> {
     // `dimensions` lets OpenAI text-embedding-3-* match EMBEDDING_DIM; servers that
     // don't support it generally ignore it.
     body: JSON.stringify({ model: modelFor('openai'), input: texts, dimensions: EMBEDDING_DIM }),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   })
   if (!res.ok) throw new Error(`OpenAI embeddings error ${res.status}: ${await res.text()}`)
   const json = (await res.json()) as { data: { embedding: number[]; index: number }[] }

@@ -63,10 +63,13 @@ knowledgeBasesRoute.post('/agents/:id/knowledge-bases', async (c) => {
 
   const kb = await getKbInOrg(parsed.data.knowledgeBaseId, orgId)
   if (!kb) return c.json({ error: 'knowledge base not found' }, 404)
+  // Private KBs belong to exactly one agent and are never shareable — linking one
+  // to another agent would leak that agent's private documents. Only shared KBs link.
+  if (kb.isDefault) return c.json({ error: 'cannot link a private KB to another agent' }, 400)
 
   await db
     .insert(agentKnowledgeBases)
-    .values({ agentId: agent.id, knowledgeBaseId: kb.id })
+    .values({ agentId: agent.id, knowledgeBaseId: kb.id, orgId })
     .onConflictDoNothing()
   return c.json({ ok: true, agentId: agent.id, knowledgeBaseId: kb.id }, 201)
 })

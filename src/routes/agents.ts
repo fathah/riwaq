@@ -12,10 +12,10 @@ export const agentsRoute = new Hono<AppEnv>()
 agentsRoute.use('*', orgAuth)
 
 const createSchema = z.object({
-  name: z.string().min(1),
-  systemPrompt: z.string().optional(),
+  name: z.string().min(1).max(200),
+  systemPrompt: z.string().max(20_000).optional(),
   provider: z.enum(['anthropic', 'openai']).optional(),
-  model: z.string().optional(),
+  model: z.string().max(200).optional(),
 })
 
 // Create an agent + its private (default) KB + the link, atomically.
@@ -40,10 +40,12 @@ agentsRoute.post('/agents', async (c) => {
 
     const [kb] = await tx
       .insert(knowledgeBases)
-      .values({ orgId, name: `${parsed.data.name} (private)`, isDefault: true })
+      .values({ orgId, name: `${parsed.data.name} (private)`, isDefault: true, agentId: agent!.id })
       .returning()
 
-    await tx.insert(agentKnowledgeBases).values({ agentId: agent!.id, knowledgeBaseId: kb!.id })
+    await tx
+      .insert(agentKnowledgeBases)
+      .values({ agentId: agent!.id, knowledgeBaseId: kb!.id, orgId })
     return { agent: agent!, privateKbId: kb!.id }
   })
 
