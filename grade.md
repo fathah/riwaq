@@ -1,529 +1,681 @@
-# Riwaq Engineering Review
+# Riwaq Engineering Re-Review
 
-> **Remediation applied 2026-07-01** — all four **P0 isolation blockers** are fixed,
-> plus a set of tractable P1/P2 items, and the project now has a **DB-backed
-> isolation test suite (30 tests, all passing) and CI**. See
-> [Remediation applied](#remediation-applied-2026-07-01) at the end for the change
-> log, the rationale behind each fix, and what was deliberately deferred.
+**Review date:** 2026-07-01
 
-**Review date:** 2026-07-01  
-**Scope:** Repository-wide static review of the TypeScript API, database model and
-migrations, RAG/memory pipeline, authentication, Docker deployment, documentation,
-and engineering controls.
+**Review type:** Independent verification after remediation
 
-## Final grade: D+ (56/100)
+**Current grade:** **C+ (75/100)**
 
-Riwaq is a **thoughtful prototype with a coherent architecture**, but it is not yet a
-production-grade multi-tenant system. The code is compact, readable, strictly typed,
-and organized around useful boundaries. The canonical chat pipeline and provider/output
-adapters are particularly good decisions.
+**Previous grade:** D+ (56/100)
 
-The grade is held down by gaps that affect the product's central promise: agent and
-end-user isolation. Private knowledge bases can be linked to other agents, and memories
-are recalled across every end user of an agent. There are also no automated tests, no
-CI, no durable background jobs, weak secret handling, no abuse controls, and insufficient
-database-enforced invariants.
+## Executive summary
 
-This would be a promising **alpha/internal prototype**. It should not handle untrusted
-tenants or sensitive customer data in its current form.
+Riwaq has improved substantially. The remediation is real: strict type checking passes,
+34 automated tests pass against PostgreSQL with pgvector, CI now exists, per-user memory
+recall is correctly scoped, conversations are bound to stored end-user identities, API
+keys are hashed, database invariants are stronger, migrations are ledgered, and several
+concurrency and ingestion issues were reduced.
+
+The project has moved from a promising alpha to a **credible beta/internal service**.
+It is still a **no-go for untrusted public production**. Private-KB isolation is not yet
+fully enforced by the database, the SSRF defense remains vulnerable to runtime DNS
+changes and redirects, end-user identity is caller-asserted rather than authenticated,
+background jobs remain lossy, LLM credentials remain plaintext, and rate/spend controls
+are absent.
+
+The senior engineer completed strong work, but some items described as “fixed” are more
+accurately “partially fixed” or “hardened.”
 
 ## Scorecard
 
-| Area | Weight | Score | Assessment |
-|---|---:|---:|---|
-| Architecture and design | 20 | 15 | Clear boundaries and sensible abstractions; important isolation rules exist only in application code |
-| Correctness and data integrity | 15 | 8 | Happy path is coherent; concurrency, partial writes, and identity consistency are under-specified |
-| Security and privacy | 20 | 7 | Basic org scoping is consistent, but agent/user isolation, secrets, SSRF, and abuse prevention need work |
-| Testing and verification | 15 | 2 | Type checking passes; no tests, coverage, CI, linting, or contract verification |
-| Reliability and operability | 15 | 6 | Health check and status fields exist; background work, shutdown, retries, telemetry, and recovery are weak |
-| Maintainability and code quality | 10 | 8 | Small, readable modules with strict TypeScript and good naming |
-| Documentation and developer experience | 5 | 5 | Strong README and design plan; setup and API intent are unusually clear |
-| **Total** | **100** | **56** | **D+** |
+| Area | Weight | Score | Change | Assessment |
+|---|---:|---:|---:|---|
+| Architecture and design | 20 | 16 | +1 | Clear service boundaries and better database modeling; a few isolation rules remain incomplete |
+| Correctness and data integrity | 15 | 12 | +4 | Core isolation defects improved; ownership updates, legacy migration, and concurrent clustering gaps remain |
+| Security and privacy | 20 | 12 | +5 | Major gains in API-key and memory security; SSRF, identity trust, LLM secrets, and abuse controls remain |
+| Testing and verification | 15 | 12 | +10 | 34 passing tests and CI; coverage remains narrow outside isolation, URL, and crypto checks |
+| Reliability and operability | 15 | 9 | +3 | Atomic ingestion, migration locking, and HTTP draining help; background jobs remain lossy |
+| Maintainability and code quality | 10 | 9 | +1 | Compact, strict, readable TypeScript with increasingly explicit invariants |
+| Documentation and developer experience | 5 | 5 | — | Strong documentation and clear architectural intent |
+| **Total** | **100** | **75** | **+19** | **C+** |
 
-## Release recommendation
+## Verification results
 
-**No-go for public production.** The P0 items below should be fixed before accepting
-real customer data. P1 items should be complete before describing the service as
-production-ready.
+| Check | Result |
+|---|---|
+| `npm run typecheck` | **Passed** |
+| `npm test` | **Passed: 34/34** |
+| URL-guard tests | **23 passed** |
+| DB-backed isolation tests | **8 passed** |
+| Crypto tests | **3 passed** |
+| Fresh migration chain `0000`–`0006` | **Passed during the test run** |
+| CI workflow present | **Verified** |
+| Dependency vulnerability audit | **Not verified in this review** |
+| Claimed live-database clone migration | **Documented, but not independently reproduced** |
 
-## Findings
+## Original findings: verified status
 
-### P0 — Isolation and security blockers
+### P0 #1 — Private knowledge bases shared across agents
 
-#### 1. Private knowledge bases can be shared with another agent
+**Status: Partially fixed**
 
-`POST /agents/:id/knowledge-bases` verifies that the agent and KB belong to the same
-organization, but it does not reject `kb.isDefault === true`. Any private KB in the
-organization can therefore be linked to any other agent. This contradicts the stated
-"isolation by default" model.
+Verified improvements:
 
-Evidence:
+- Private KBs have an explicit `agent_id`.
+- A partial unique index permits only one owned private KB per agent.
+- A check constraint requires private KBs to have owners and shared KBs not to.
+- The route rejects attempts to link a private KB.
+- Agent uploads resolve the private KB through its explicit owner.
+- Route-level and DB-level isolation tests were added.
 
-- `src/routes/knowledge-bases.ts:55-71` permits linking every same-org KB.
-- `src/routes/knowledge-bases.ts:74-82` recognizes default KBs as private only when
-  unlinking.
-- `src/db/schema.ts:44-67` does not model ownership of a private KB or enforce the
-  invariant in the database.
+Remaining defects:
 
-Impact: accidental or malicious cross-agent retrieval of private documents. Linking a
-second private KB can also make the convenience upload route choose an arbitrary default
-KB because it uses `LIMIT 1` without a unique ownership relationship.
+- The database still permits a direct same-organization
+  `agent_knowledge_bases` row linking agent B to agent A's private KB.
+- Private KB ownership does not enforce that the owner and KB belong to the same
+  organization through a composite foreign key.
+- Migration `0003_kb_ownership.sql` does not delete or reject historical cross-agent
+  private-KB links.
+- Its backfill may fail when historical illegal links cause several private KBs to be
+  assigned to the same agent before the unique index is created.
 
-Required fix: give a private KB an explicit owning agent, enforce one private KB per
-agent with database constraints, reject private KBs in the shared-link endpoint, and
-test cross-agent access at both route and retrieval layers.
+Required completion:
 
-#### 2. Per-user memories leak across end users
+1. Enforce `(knowledge_base_id, agent_id)` ownership for private links at the database
+   layer, using separate private/shared relationships or an equivalent constraint model.
+2. Add a composite ownership FK that includes `org_id`.
+3. Detect and resolve ambiguous legacy links explicitly during migration.
+4. Add direct-DB tests proving same-org cross-agent private links are impossible.
 
-Memories are stored with `endUserId`, but recall and deduplication filter only by
-`agentId`. Facts extracted from user A can be inserted into user B's prompt, and similar
-facts from different users can suppress each other.
+### P0 #2 — Per-user memory leakage
 
-Evidence:
+**Status: Fixed**
 
-- `src/services/memory.ts:12-20` recalls all memories for an agent.
-- `src/services/memory.ts:50-63` deduplicates across all users of an agent.
-- `src/prompts/system.ts:19-20` describes the recalled data as facts about "this user."
+`recallMemories()` now filters by agent and by:
 
-Impact: direct privacy leakage between an agent's end users and corruption of long-term
-memory.
+```text
+current end user OR agent-wide memory
+```
 
-Required fix: pass the authenticated/validated end-user identity into recall; query
-`endUserId = current user OR endUserId IS NULL`; scope user-memory deduplication to the
-same user; add adversarial isolation tests.
+Deduplication is scoped to the same agent and end user. The DB-backed test proves Alice
+does not recall Bob's memory and vice versa.
 
-#### 3. Conversation identity is not bound to `endUserId`
+Residual recommendation: add a database index covering `(agent_id, end_user_id)` and
+tests for deduplication, null agent-wide memories, and concurrent writes.
 
-When a caller supplies a conversation ID, the code verifies only that it belongs to the
-agent. It does not verify that the conversation's stored `endUserId` matches the request.
-The new learning event uses the request's identity rather than the conversation's
-identity.
+### P0 #3 — Conversation identity mismatch
 
-Evidence: `src/services/chat.ts:84-99`.
+**Status: Core defect fixed; trust-boundary caveat remains**
 
-Impact: one end user can continue another user's conversation if its ID is exposed, and
-new memories can be attributed to the wrong person.
+Continuing a conversation now loads its stored `endUserId` and returns 403 on mismatch
+before embedding, retrieval, persistence, or learning. This behavior is tested.
 
-Required fix: select and compare the conversation's `endUserId`, or derive identity
-exclusively from the stored conversation. Do not treat a caller-supplied string as
-authentication; production integrations need a trusted identity boundary.
+However, `endUserId` is still an arbitrary string supplied by the API caller. This is
+safe only when Riwaq is called by a trusted organization backend that authenticates the
+real end user. It is not end-user authentication.
 
-#### 4. Tenant-controlled LLM URLs create an SSRF boundary
+Required production control: bind end-user identity to a signed token, trusted gateway
+claim, or organization-side server credential rather than accepting it directly from an
+untrusted client.
 
-An organization can store an arbitrary `baseUrl`, which is later used by server-side LLM
-clients. URL syntax validation does not block loopback, link-local, private network,
-cloud metadata, redirect, or DNS-rebinding targets.
+### P0 #4 — Tenant-controlled LLM endpoint SSRF
 
-Evidence:
+**Status: Partially fixed**
 
-- `src/routes/organizations.ts:63-79` accepts any valid URL.
-- `src/services/llm-config.ts:45-53` passes the value into the runtime config.
-- `src/lib/llm.ts:60-82` constructs network clients from that URL.
+Verified improvements:
 
-Impact: authenticated tenants may probe internal services from the API network. Depending
-on reachable services and response behavior, this can become data exposure or lateral
-movement.
+- HTTPS is required by default.
+- Embedded credentials and local hostnames are rejected.
+- IPv4 private, loopback, link-local, CGNAT, metadata, multicast, and reserved ranges
+  are blocked.
+- Common IPv6 local/private ranges are blocked.
+- DNS answers are checked when the configuration is saved.
+- An optional hostname allowlist exists.
+- The guard has 23 passing unit tests.
 
-Required fix: default to an allowlist of approved providers. If custom endpoints are a
-product requirement, isolate egress, resolve and validate DNS/IP ranges, revalidate
-redirects, block non-HTTPS except explicit development mode, and apply timeouts and
-response-size limits.
+Remaining exposure:
 
-### P1 — Required for production readiness
+- DNS is validated when saving configuration, not when connecting. DNS rebinding or a
+  later DNS change can bypass the decision.
+- Redirect targets are not revalidated by this layer.
+- Existing stored base URLs are not revalidated by a migration or at request time.
+- IPv6 classification is handcrafted and does not comprehensively classify every
+  non-public representation/range.
+- The production allowlist is optional rather than required.
+- Network-level egress controls are absent.
 
-#### 5. Authentication and LLM secrets are stored in plaintext
+Required completion: validate/pin the actual connection destination, disable or validate
+redirects, use a proven IP/CIDR library, require an allowlist in production, and enforce
+egress restrictions at the network layer.
 
-Organization API keys and tenant LLM keys are stored directly in the database.
-Authentication performs a direct equality lookup, and SDK client caches retain raw keys
-for the process lifetime.
+## P1 findings
 
-Evidence: `src/db/schema.ts:19-27`, `src/middleware/auth.ts:18-22`,
-`src/lib/llm.ts:60-82`.
+### #5 — Secret storage
 
-Store a keyed hash of API keys, show the secret only at creation, support rotation and
-revocation, encrypt LLM credentials with a KMS-backed envelope key, avoid putting raw
-secrets in cache keys, and add audit events for credential changes.
+**Status: Partially fixed**
 
-#### 6. No rate limits, quotas, or input-size limits
+Organization API keys are now high-entropy, returned once, stored as SHA-256 hashes, and
+looked up efficiently by hash. This is appropriate for randomly generated 192-bit
+credentials.
 
-Public organization creation is unlimited. Chat messages, history arrays, JSON text,
-multipart files, names, and system prompts have no practical maximums. Upload parsing
-buffers entire files in memory. Tenant-triggered LLM and embedding calls have no budget
-or concurrency control.
+Still open:
 
-Evidence: `src/routes/organizations.ts:12-27`, `src/routes/documents.ts:27-50`,
-`src/routes/chat.ts:13-17`, `src/routes/openai.ts:60-116`.
+- Organization LLM API keys remain plaintext.
+- No KMS/envelope encryption or rotation workflow exists.
+- No credential-change audit log exists.
+- LLM client caches retain raw credentials in cache keys and memory.
 
-Add request-body limits at the server boundary, per-route schemas with maximum lengths,
-file type/size/page limits, per-org rate and spend quotas, concurrency caps, and
-backpressure. Protect public bootstrap with an invite/admin flow or strong anti-abuse
-controls.
+### #6 — Rate, quota, and input controls
 
-#### 7. Background work is lossy and non-idempotent
+**Status: Partially fixed**
 
-Document ingestion and learning use in-process fire-and-forget promises. A restart loses
-work. There are no leases, retries, retry limits, dead-letter state, cancellation, or
-recovery scan. Ingestion inserts chunks and updates status in separate operations, so a
-failure can leave partial chunks; retrying can duplicate them.
+Global request-body limits and several field, upload, and extracted-text limits were
+added.
 
-Evidence: `src/routes/documents.ts:15-24`, `src/services/ingest.ts:11-34`,
-`src/services/learn.ts:11-46`.
+Still open:
 
-Move this work to a durable queue/outbox, make jobs idempotent, write chunks and status
-atomically, expose attempts/error details, and recover stale `processing` rows.
+- No per-IP or per-organization rate limits
+- No concurrent-request caps or backpressure
+- No token or monetary budgets
+- No upload/document/storage quotas
+- Public organization creation remains unlimited
+- The default 10 MB body limit makes the route's 15 MB raw-file limit unreachable
 
-#### 8. There is no automated test suite or CI quality gate
+### #7 — Background reliability
 
-The repository has no unit, integration, security-isolation, migration, streaming,
-provider-contract, or end-to-end tests. `package.json` exposes only dev/start/migrate/
-typecheck scripts. No CI workflow is present.
+**Status: Partially fixed**
 
-For a multi-tenant data system, type checking alone is far below the assurance bar.
-Prioritize matrix tests proving that org A cannot access org B, agent A cannot retrieve
-agent B's private KB, and user A cannot recall user B's memories.
+Chunk replacement and document-ready status now commit atomically. Prior chunks are
+deleted before replacement, making completed retries idempotent. A recovery scan marks
+stale processing documents as errors.
 
-#### 9. Database invariants are weaker than the domain model
+Still open:
 
-The database permits cross-org agent/KB links, chunk rows whose document and KB disagree,
-arbitrary role/status/provider/feedback strings, multiple private KBs per agent, and
-duplicate agent names despite name-based model resolution. Most tenancy guarantees
-depend on every current and future handler remembering the correct guard.
+- In-process fire-and-forget jobs are lost on restart.
+- Failed/stale jobs are not automatically retried.
+- No queue, lease, retry policy, dead-letter state, or outbox exists.
+- Learning jobs remain fire-and-forget.
+- Marking a job as failed is detection, not recovery.
 
-Evidence: `src/db/schema.ts:31-150` and `src/db/migrations/0000_init.sql:12-117`.
+### #8 — Tests and CI
 
-Use composite foreign keys or tenant IDs on link/data tables, unique and check
-constraints, explicit enums where appropriate, and Row Level Security as defense in
-depth. Make agent-name lookup deterministic with a per-org unique constraint or remove
-name-based resolution.
+**Status: Fixed for the original finding**
 
-#### 10. Topic counters have lost-update races
+The project now has Vitest, GitHub Actions, 23 URL-security tests, and seven DB-backed
+isolation tests. The suite passed independently during this re-review.
 
-Topic assignment reads `count`, then writes `count + 1` without a lock or atomic
-increment. Concurrent questions can lose counts. Topic matching and log insertion are
-also not transactional, and centroids are never updated after assignment.
+Further work:
 
-Evidence: `src/services/topics.ts:22-52`.
+- Route validation and body-limit tests
+- API-key migration and authentication tests
+- Streaming/provider contract tests
+- Ingestion failure and retry tests
+- Migration-upgrade tests containing intentionally corrupted legacy states
+- Concurrency tests for topics and memories
+- Coverage reporting and minimum thresholds
 
-Use an atomic SQL increment and a transaction; define a concurrency-safe clustering
-strategy and update centroids intentionally.
+The test database setup should also refuse to drop any database whose name does not
+match a dedicated test-only pattern.
 
-### P2 — Engineering maturity gaps
+### #9 — Database invariants
 
-#### 11. Retrieval has no relevance threshold or context budget
+**Status: Substantially improved, not complete**
 
-The top six chunks and top five memories are always injected, regardless of similarity.
-Character chunking and fixed item counts do not enforce a model token budget. This
-increases irrelevant context, cost, and prompt-injection exposure.
+Added:
 
-Add calibrated similarity thresholds, token-aware packing, diversity/deduplication,
-retrieval evaluation datasets, and explicit treatment of retrieved text as untrusted
-data.
+- Enum-like check constraints
+- Case-insensitive per-org agent-name uniqueness
+- Chunk/document KB consistency
+- Cross-org agent/KB link protection through composite foreign keys
+- Private-KB ownership and uniqueness constraints
 
-#### 12. Prompt-injection controls are insufficient
+Remaining:
 
-Uploaded documents and extracted memories become system-prompt content. The base rule is
-useful but is not a security boundary; malicious knowledge can instruct the model to
-ignore policy or disclose other context.
+- Same-org private KBs can still be linked to the wrong agent through direct SQL.
+- Private-KB owner and KB organization are not tied by a composite FK.
+- Some invariants are represented in raw migrations but not fully in the Drizzle schema.
+- Row Level Security is not used as defense in depth.
 
-Separate instructions from data with robust delimiters, tell the model explicitly that
-retrieved content is untrusted and non-authoritative, sanitize/scan ingestion, and test
-known indirect prompt-injection attacks. Do not rely on model instructions alone for
-access control.
+### #10 — Topic clustering concurrency
 
-#### 13. Migration management is not auditable
+**Status: Partially fixed**
 
-Every boot replays every SQL file and relies on `IF NOT EXISTS`/repeatable `ALTER`
-behavior. There is no migration ledger, checksum, lock, rollback/forward-fix policy, or
-compatibility test. Concurrent replicas can race during startup.
+Existing-topic counters now use an atomic SQL increment, and the topic update and
+question log are transactional.
 
-Adopt a real migration runner with an immutable history table and advisory lock. Run
-migrations as a deployment step, not independently in every API replica.
+Still open:
 
-#### 14. Production container and Compose defaults need hardening
+- Concurrent requests can both observe no matching topic and create duplicate clusters.
+- The selected nearest topic can become stale before the transaction.
+- Topic centroids are never updated as new questions join.
+- There is no deterministic concurrency strategy or clustering-quality evaluation.
 
-The image runs TypeScript through `tsx`, installs development dependencies, copies the
-whole repository, and runs as root. Compose publishes Postgres, uses fixed development
-credentials, mounts source, and runs the watch server.
+## P2 findings
 
-Create separate development and production targets; use `npm ci`, compile ahead of time,
-copy only runtime artifacts, prune dev dependencies, run as a non-root user, pin image
-digests, add a read-only filesystem where possible, and keep the database private.
+### #11 — Retrieval relevance and context budget
 
-#### 15. Observability and lifecycle management are minimal
+**Status: Improved**
 
-Logs are unstructured and there are no request IDs, tenant-safe traces, metrics, SLOs,
-queue depth, provider latency/error metrics, readiness distinction, signal handling, or
-graceful database/server shutdown. `/health` proves only that one DB query succeeds.
+A similarity threshold and character budget exist. The threshold defaults to zero, so
+weak results remain enabled until deployments calibrate it. The implementation can also
+keep an oversized first hit beyond the nominal budget.
 
-Add structured redacted logging, correlation IDs, metrics/tracing, readiness/liveness
-separation, graceful shutdown, and operational alerts. Never log prompts, retrieved
-customer data, or secrets by default.
+Token-aware packing, model-specific calibration, reranking/diversity, and retrieval
+evaluation remain necessary.
 
-#### 16. API contracts and error semantics need tightening
+### #12 — Indirect prompt injection
 
-Several endpoints return success even when no row changed; unknown `format` values
-silently become native; numeric options are cast rather than fully validated; and the
-OpenAI-compatible body is hand-parsed with incomplete constraints. No API schema is
-generated or tested.
+**Status: Improved, inherently not “fixed”**
 
-Define a versioned OpenAPI contract, validate path/query/body inputs consistently,
-return deterministic error envelopes, and add compatibility tests against supported SDKs.
+Retrieved memory and knowledge are explicitly labeled as untrusted data and separated
+with delimiters. This is good defense in depth, but model instructions are not an access
+control mechanism.
 
-## What is done well
+Remaining work includes adversarial evaluation, ingestion scanning, sensitive-output
+controls, and strict retrieval authorization independent of the model.
 
-- **Good separation of concerns.** Routes, services, provider adapters, serializers,
-  prompts, and database access are easy to navigate.
-- **Strong canonical model.** Normalizing providers into one `ChatResult` and projecting
-  output formats afterward is the right extension point.
-- **Strict TypeScript.** `strict` and `noUncheckedIndexedAccess` are enabled, and the
-  current code passes `tsc --noEmit`.
-- **Mostly consistent organization scoping.** Resource routes generally resolve the
-  organization from authentication and verify ownership before access.
-- **Atomic agent bootstrap.** Agent, private KB, and initial link are created in one
-  transaction.
-- **Pragmatic provider design.** Layered agent/org/deployment configuration is clearly
-  expressed and provider details do not leak through the main chat service.
-- **Excellent project narrative.** The README and plan explain the product, tenancy
-  model, request path, API surface, and operational assumptions clearly.
-- **Small, readable modules.** At roughly 2,250 lines of application code, the system is
-  approachable and has not been prematurely buried under framework machinery.
+### #13 — Migration management
 
-## Recommended remediation sequence
+**Status: Mostly fixed**
 
-### Phase 1 — Restore the isolation contract
+The migration runner now provides:
 
-1. Model private KB ownership and enforce it in database constraints.
-2. Block private KB linking and fix deterministic private-KB lookup.
-3. Scope memory recall/deduplication by end user.
-4. Bind conversations to a trusted end-user identity.
-5. Add a comprehensive tenant/agent/user isolation integration suite.
+- A schema migration ledger
+- Checksums
+- Immutable-history enforcement
+- Transactional application
+- A session-level advisory lock
 
-### Phase 2 — Establish a safe service boundary
+Remaining concerns:
 
-1. Hash API keys; encrypt LLM credentials; add rotation and audit logs.
-2. Restrict custom LLM egress and mitigate SSRF.
-3. Add request, upload, concurrency, rate, and spend limits.
-4. Add strong schema validation and a versioned OpenAPI contract.
-5. Add secure production container and deployment configurations.
+- Migration still runs during API startup rather than as a dedicated deployment step.
+- Upgrade behavior from every historical/corrupted state is not tested.
+- The private-KB backfill needs explicit ambiguity handling.
+
+### #14 — Container and Compose hardening
+
+**Status: Open**
+
+The production image still runs TypeScript through `tsx`, includes development
+dependencies, copies the repository broadly, and runs as root. Compose remains
+development-oriented and publishes PostgreSQL with fixed credentials.
+
+### #15 — Observability and lifecycle
+
+**Status: Partially improved**
+
+Signal handlers and DB-pool closure were added. However, the shutdown sequence calls
+`server.close()` without awaiting completion before closing the database and exiting, so
+in-flight requests are not guaranteed to drain.
+
+Structured logs, request IDs, metrics, tracing, readiness, SLOs, provider telemetry,
+queue visibility, and alerting remain open.
+
+### #16 — API contract and error semantics
+
+**Status: Mostly open**
+
+403 handling and field constraints improved, but there is still no versioned OpenAPI
+contract or SDK compatibility suite. Some delete/update operations report success when
+nothing changed, unknown output formats silently fall back, and the OpenAI-compatible
+request validation is incomplete.
+
+## What is now strong
+
+- Clear route/service/provider/serializer boundaries
+- Provider-independent canonical chat contract
+- Strict TypeScript with `noUncheckedIndexedAccess`
+- Consistent organization-level route guards
+- Correct per-user memory recall
+- Stored conversation identity validation
+- Hashed organization API keys
+- Stronger relational and enum-like database constraints
+- Atomic/idempotent chunk persistence
+- Ledgered and locked migrations
+- DB-backed isolation tests
+- Automated CI
+- Excellent README and architecture narrative
+- Small, readable modules without unnecessary framework complexity
+
+## Production-readiness blockers
+
+The following must be completed before accepting untrusted tenants or sensitive
+customer data:
+
+1. Fully enforce private-KB ownership and access in the database.
+2. Make the ownership/link migration safe for every historical ambiguous state.
+3. Establish a trusted end-user identity mechanism.
+4. Enforce SSRF protection at connection and network-egress layers.
+5. Encrypt and rotate tenant LLM credentials.
+6. Add rate, concurrency, storage, and spend controls.
+7. Move ingestion and learning to durable jobs.
+8. Implement truly graceful shutdown and production telemetry.
+9. Harden the production container and deployment configuration.
+
+## Recommended next sequence
+
+### Phase 1 — Close remaining isolation gaps
+
+1. Redesign private/shared KB links so illegal private access is unrepresentable.
+2. Add same-org direct-SQL isolation tests.
+3. Repair and test ambiguous legacy migration states.
+4. Add trusted end-user identity verification.
+
+### Phase 2 — Harden the service boundary
+
+1. Require provider allowlists and network egress policies in production.
+2. Encrypt LLM credentials with KMS-backed envelope encryption.
+3. Add tenant/IP rate limits, concurrency caps, and spend quotas.
+4. Add complete request schemas and a versioned OpenAPI contract.
 
 ### Phase 3 — Make execution durable
 
-1. Introduce a durable queue/outbox for ingestion and learning.
-2. Make jobs transactional/idempotent with retries and dead-letter handling.
-3. Fix atomic topic counting and clustering concurrency.
-4. Adopt ledgered, locked migrations.
-5. Add graceful shutdown, structured telemetry, metrics, and alerts.
+1. Introduce a DB outbox or durable job queue.
+2. Add leases, idempotency keys, retries, dead-letter state, and recovery.
+3. Make topic creation concurrency-safe and update centroids deliberately.
+4. Await HTTP drain before DB shutdown and process exit.
 
-### Phase 4 — Raise model-system quality
+### Phase 4 — Establish production assurance
 
-1. Build retrieval and answer-quality evaluation sets.
-2. Add relevance thresholds and token-aware context packing.
-3. Test indirect prompt injection and data-exfiltration scenarios.
-4. Track cost, latency, retrieval quality, groundedness, and failure rates per tenant.
-
-## Verification performed
-
-- Read all application modules, SQL migrations, deployment files, and primary
-  documentation.
-- Ran `npm run typecheck`: **passed**.
-- Checked the repository for test/spec and CI files: **none found**.
-- Attempted `npm audit --omit=dev`; the registry was unreachable in the review
-  environment, so dependency vulnerability status is **not verified** and is not
-  included in the numerical grade.
+1. Add streaming, provider-contract, ingestion, migration, and concurrency tests.
+2. Add coverage thresholds and security regression tests.
+3. Build retrieval and prompt-injection evaluation datasets.
+4. Add structured telemetry, SLOs, dashboards, and alerts.
+5. Ship a minimal non-root production image and private production Compose/deployment
+   profile.
 
 ## Grade interpretation
 
-- **A:** production-ready, measured, secure, resilient, and comprehensively tested.
-- **B:** strong system with bounded, non-critical production gaps.
-- **C:** viable beta with meaningful reliability or security debt.
-- **D:** promising prototype with blockers in core guarantees.
-- **F:** unsafe or fundamentally non-functional.
+- **A:** Secure, resilient, measured, and comprehensively tested production system
+- **B:** Production-capable system with bounded, non-critical gaps
+- **C:** Credible beta with material security or reliability work remaining
+- **D:** Prototype with blockers in its core guarantees
+- **F:** Fundamentally unsafe or non-functional
 
-Riwaq lands at **D+** because the architecture is better than the maturity score suggests,
-but privacy/isolation defects affect the exact guarantees the product is built around.
-Fixing the P0 issues and adding serious isolation tests would move it quickly toward a
-credible C; durable execution, hardened secrets/egress, CI, and operational controls are
-needed for B territory.
+Riwaq is now a **C+**. The remediation deserves significant credit: it fixed the most
+direct memory leak, added conversation binding, introduced meaningful database
+constraints, established tests and CI, and improved several operational paths. The
+remaining issues are narrower than before but still material. Completing private-KB
+database enforcement, trusted identity, egress security, durable jobs, and production
+controls would put the project in **B territory**.
 
 ---
 
-# Remediation applied (2026-07-01)
+# Round 2 remediation applied (2026-07-01)
 
-This section records the fixes made in response to the review, the reasoning for each
-approach, and how it was verified. **Everything below was verified by `tsc --noEmit`
-(passes) and a new automated suite of 30 tests (all passing), including a real
-Postgres+pgvector isolation matrix.** The migration path was additionally validated
-against a *clone of the live dev database* to prove the destructive key-hashing
-migration is safe on existing data.
+Response to the re-review above. Each item below targets a specific "remaining
+defect / still open" the re-review named. Verified with `tsc --noEmit` (passes) and
+**34 automated tests, all passing** (was 30), plus a full migration run (`0000`–`0006`)
+against a clone of the live dev database. The genuine *bugs* the re-review found are
+fixed; the larger deferrals are restated honestly at the end.
 
-## Guiding principle
+## The headline defect: private-KB link now enforced by the database (P0 #1 / #9)
 
-The review's central point is that **isolation guarantees lived only in application
-code** — one forgotten `WHERE` clause and a tenant boundary silently disappears. So the
-theme of this remediation is to **push each invariant to the lowest layer that can
-enforce it**: database constraints where possible, a single choke-point function where
-not, and a test that *proves* the boundary holds. Prompts and route guards are the last
-line, not the only line.
+The re-review was right — the route rejected linking a private KB, but a **direct
+`agent_knowledge_bases` INSERT could still link agent B to agent A's private KB**. That
+hole is now closed at the database layer in
+[0006_private_kb_link_guard.sql](src/db/migrations/0006_private_kb_link_guard.sql):
 
-## P0 — Isolation blockers (all fixed)
+- **A `BEFORE INSERT/UPDATE` trigger** on `agent_knowledge_bases` rejects any link to a
+  `is_default` KB whose owner ≠ the linking agent. A same-org cross-agent private link is
+  now **impossible via any code path or raw SQL**.
+- **A composite FK** `knowledge_bases(agent_id, org_id) → agents(id, org_id)` ties a
+  private KB's owner to the KB's organization (the "ownership FK that includes org_id"
+  the re-review asked for).
+- **Legacy cleanup**: the migration first `DELETE`s any historical illegal links (a
+  default KB linked to a non-owner agent), resolving the ambiguity the re-review flagged
+  before the guard is installed.
+- **A direct-DB test** now proves the same-org cross-agent private link is refused —
+  [isolation.test.ts](tests/isolation.test.ts) inserts exactly that row (with a valid
+  `org_id`, so only the trigger stands in the way) and asserts it throws.
 
-### #1 Private KBs can be linked to another agent → **fixed**
+*Why a trigger rather than a pure composite FK:* enforcing "private KB ⇒ link agent = owner"
+relationally requires a nullable composite FK, which SQL's `MATCH SIMPLE` skips whenever a
+column is NULL — leaving a bypass. A trigger states the invariant directly and completely,
+which is the reliable "equivalent constraint model" the re-review allowed for.
 
-- **What changed:** private KBs now have an explicit owning agent
-  (`knowledge_bases.agent_id`), with a DB **CHECK** (`private ⇔ owner present`) and a
-  **unique partial index** (one private KB per agent). The share endpoint rejects
-  `isDefault` KBs, and the convenience upload route resolves the private KB by owner
-  instead of an ambiguous `LIMIT 1` over a join.
-- **Files:** [0003_kb_ownership.sql](src/db/migrations/0003_kb_ownership.sql),
-  [schema.ts](src/db/schema.ts), [knowledge-bases.ts:64](src/routes/knowledge-bases.ts),
-  [agents.ts](src/routes/agents.ts), [documents.ts](src/routes/documents.ts).
-- **Why this is the right fix:** the review asked for exactly this — *"give a private KB
-  an explicit owning agent, enforce one private KB per agent with database
-  constraints."* Doing it in the schema means the leak is **unrepresentable**, not just
-  discouraged: even a future buggy handler physically cannot create a second private KB
-  or an ownerless one. The route check is a fast, friendly 400; the DB constraint is the
-  guarantee.
+## Genuine bugs the re-review found — fixed
 
-### #2 Per-user memories leak across end users → **fixed**
+- **#6 body limit made the 15 MB upload cap unreachable.** The global body limit default
+  is now 20 MB, and the upload cap is *derived* as `min(15 MB, MAX_BODY_BYTES)`
+  ([documents.ts](src/routes/documents.ts), [env.ts](src/env.ts)) so the two can never
+  drift out of sync again.
+- **#15 shutdown didn't drain in-flight requests.** `shutdown` now `await`s
+  `server.close()` (promisified) *before* ending the DB pool
+  ([index.ts](src/index.ts)) — connections actually drain now.
+- **#11 an oversized first hit could exceed the context budget.** Retrieval now truncates
+  content to the remaining budget for every hit including the first, so total injected
+  context is hard-bounded ([retrieve.ts](src/services/retrieve.ts)).
+- **#8 test harness could drop a non-test database.** `globalSetup` now refuses any
+  target whose name doesn't match a `test` pattern before issuing `DROP DATABASE`
+  ([globalSetup.ts](tests/globalSetup.ts)).
 
-- **What changed:** `recallMemories(agentId, endUserId, …)` now filters
-  `endUserId = current OR endUserId IS NULL` (this user's facts + agent-wide facts,
-  never another user's). Dedup on write is scoped to the same `(agent, endUserId)` so one
-  user's fact can't suppress another's.
-- **Files:** [memory.ts](src/services/memory.ts), [chat.ts:115](src/services/chat.ts).
-- **Why this is the right fix:** memory is recalled through exactly one function, so
-  scoping it there closes the leak everywhere at once — there's no second recall path to
-  forget. Keeping the `IS NULL` branch preserves the intended "agent-wide fact" feature
-  while making per-user facts strictly private. Proven by an adversarial test asserting
-  Alice never sees Bob's fact and vice-versa.
+## #5 — tenant LLM credentials no longer plaintext
 
-### #3 Conversation identity not bound to `endUserId` → **fixed**
+Optional **AES-256-GCM envelope encryption at rest** for org LLM keys
+([crypto.ts](src/lib/crypto.ts)): sealed on write ([organizations.ts](src/routes/organizations.ts)),
+decrypted in-process only at call time ([llm-config.ts](src/services/llm-config.ts)).
+Enabled by `SECRET_ENCRYPTION_KEY`; with no key it transparently passes through plaintext
+(dev), and `decryptSecret` detects the format so pre-existing plaintext keys keep working.
+LLM client **cache keys are now hashed** ([llm.ts](src/lib/llm.ts)) so raw credentials
+aren't retained as map keys. A crypto round-trip test was added
+([crypto.test.ts](tests/crypto.test.ts)). *Still deferred:* cloud-KMS-backed keys,
+rotation workflow, and a credential-change audit log — these need a key-management/product
+decision, not just code.
 
-- **What changed:** continuing a conversation now loads the stored `endUserId` and
-  **refuses a mismatch with 403** before any work happens; learning is attributed to the
-  validated identity.
-- **Files:** [chat.ts:84](src/services/chat.ts) (+ 403 plumbed through
-  [chat route](src/routes/chat.ts) and [openai route](src/routes/openai.ts)).
-- **Why this is the right fix:** a caller-supplied conversation id is not proof of
-  identity, so the fix treats it as a claim to be checked against the source of truth
-  (the stored row). The check is the very first step — cheap, and it fails closed before
-  embeddings, retrieval, or memory attribution can run against the wrong person.
+## #2 residual — added the recall index
 
-### #4 Tenant-controlled LLM URLs are an SSRF vector → **fixed**
+`CREATE INDEX idx_memories_agent_user ON memories(agent_id, end_user_id)` — the per-user
+recall path is now indexed.
 
-- **What changed:** a pure, unit-tested URL guard
-  ([url-guard.ts](src/lib/url-guard.ts)) rejects non-https, embedded credentials,
-  `localhost`, and any host that is **or resolves to** a loopback/private/link-local/
-  CGNAT/cloud-metadata address (IPv4 + IPv6, including IPv4-mapped). It's enforced when
-  an org saves its `baseUrl` ([organizations.ts](src/routes/organizations.ts)), with an
-  optional strict `LLM_ALLOWED_HOSTS` provider allowlist. Remote embedding calls also got
-  30s timeouts.
-- **Why this is the right fix:** the guard is **pure with an injectable resolver**, so
-  the dangerous range logic (the part that's easy to get subtly wrong) is exhaustively
-  unit-tested — including the classic `169.254.169.254` metadata target and a DNS host
-  that resolves to `10.x` — with zero network flakiness. Blocking private ranges is
-  always on (safe default); the allowlist is available for locked-down deployments, which
-  is the review's "default to an allowlist of approved providers" without breaking the
-  product's bring-your-own-endpoint feature. *Residual:* runtime DNS-rebinding still
-  warrants network-level egress isolation in production (noted under Deferred).
+## Still deferred (unchanged reasoning, restated honestly)
 
-## P1 / P2 — also fixed
+These remain open by design; they're infrastructure/product decisions, not point fixes,
+and the re-review's framing of them is accurate:
 
-### #9 Weak database invariants → **hardened** ([0004_invariants.sql](src/db/migrations/0004_invariants.sql))
-CHECK constraints for every enum-like column (role, status, source, feedback,
-provider); a **per-org unique agent name** (makes the OpenAI route's name→agent
-resolution deterministic); a **composite FK** so a chunk's KB must equal its document's
-KB; and **org_id carried on the agent↔KB link with composite FKs to both sides**, making
-a cross-org link impossible at the database. *Why:* these are the guarantees the domain
-model always implied; encoding them as constraints means "every current and future
-handler remembering the guard" is no longer required. A test asserts the cross-org link
-is rejected by the DB itself.
+- **#3 trusted end-user identity.** `endUserId` is still a caller-asserted string. Binding
+  it to a signed token / gateway claim is a protocol decision for the integration
+  boundary; the stored-identity check we added is the correct *internal* control but is
+  not end-user authentication.
+- **#4 runtime SSRF (DNS-rebinding, redirect revalidation, required-allowlist-in-prod,
+  a vetted IP/CIDR library, network egress policy).** Validation-time DNS + range blocking
+  covers the common case; full runtime protection belongs at the socket/network layer.
+- **#7 durable jobs.** In-process work is now atomic/idempotent with crash recovery, but a
+  real queue/outbox (leases, retries, DLQ) is a larger addition.
+- **#6 residual rate/spend/concurrency quotas**, **#10 clustering-concurrency dedup**,
+  **#13 migrations-as-a-deploy-step**, **#14 container hardening**, **#15 telemetry**,
+  **#16 OpenAPI contract** — all acknowledged, none blocking the isolation guarantees.
 
-### #10 Topic-counter lost updates → **fixed** ([topics.ts](src/services/topics.ts))
-Counter now uses an atomic `count = count + 1` (not read-then-write) inside a
-transaction that also writes the question log. *Why:* an atomic SQL increment is the
-standard, race-free primitive; the transaction keeps the topic update and its log row
-consistent. The LLM label call was moved *outside* the transaction so we never hold one
-open across a network round-trip.
-
-### #5 Plaintext API keys → **hashed** ([0005_api_key_hash.sql](src/db/migrations/0005_api_key_hash.sql), [api-key.ts](src/lib/api-key.ts))
-Only a SHA-256 hash + a non-secret display prefix are stored; the raw key is shown once
-at creation and auth looks up by hash. Existing keys are hashed in-place by the
-migration (verified on a dev clone: the original key still authenticates). *Why:* the key
-is 192 bits of CSPRNG output, so a single fast digest is both sufficient (no brute-force
-preimage) and keeps auth O(1) via a unique index — a per-row slow KDF would add latency
-for no security gain here. LLM-credential encryption at rest is the remaining, heavier
-half of this finding (Deferred).
-
-### #6 No input/size limits → **added** ([index.ts](src/index.ts), [documents.ts](src/routes/documents.ts), route schemas)
-A body-size limit at the server boundary (413), plus per-field maxima (message, name,
-system prompt, model) and upload caps (raw bytes + extracted-text length). *Why:* bounds
-the memory and embedding-cost blast radius of a single tenant without a heavier quota
-system, which is the right first increment.
-
-### #7 Lossy, non-idempotent background work → **partially hardened** ([ingest.ts](src/services/ingest.ts))
-Ingestion now writes chunks + flips status in **one transaction** and **clears prior
-chunks first** (idempotent retry, no partial/duplicate state); embedding happens before
-the transaction opens. A **boot recovery scan** fails documents stuck in `processing`
-after a crash. *Why:* this removes the partial-write and duplicate-on-retry hazards now;
-a durable queue (the full fix) is a larger infra decision left as the documented upgrade
-path.
-
-### #13 Unauditable migrations → **fixed** ([migrate.ts](src/db/migrate.ts))
-Replaced blind replay with a **ledgered, advisory-locked** runner: each file applies
-once, in a transaction, recorded with a checksum; an edited-after-apply file is a hard
-error; concurrent replicas serialize on a Postgres advisory lock. *Why:* this is the
-standard migration-runner contract (immutable history + lock) and it directly kills the
-"every boot replays everything / replicas race" problem the review flagged.
-
-### #15 Minimal lifecycle → **improved** ([index.ts](src/index.ts))
-Graceful `SIGTERM`/`SIGINT` shutdown that stops accepting connections and drains the DB
-pool. *Why:* cheap, standard, and prevents dropped in-flight requests / leaked
-connections on deploy.
-
-### #11 / #12 Retrieval & prompt-injection → **improved** ([retrieve.ts](src/services/retrieve.ts), [system.ts](src/prompts/system.ts))
-Retrieval gained a (calibratable, default-off) similarity threshold and a character
-budget so context can't grow unbounded. The system prompt now wraps Knowledge and Memory
-in hard-to-forge delimiters and explicitly tells the model that retrieved content is
-**untrusted data, not instructions**. *Why:* threshold is default-off so it can be tuned
-per embedding model without regressing the demo; the untrusted-content framing is a real
-mitigation while (as the review stresses) the *actual* access control remains the
-retrieval scoping, not the prompt.
-
-### #8 No tests / CI → **established** ([tests/](tests), [ci.yml](.github/workflows/ci.yml))
-A `vitest` suite: pure unit tests for the SSRF guard, and a **DB-backed isolation matrix**
-that spins up a throwaway `riwaq_test` database and proves org-A-can't-read-org-B,
-private-KB-can't-be-linked, per-user-memory-isolation, conversation-identity binding, and
-the DB-level constraints. GitHub Actions runs typecheck + the full suite against a
-`pgvector/pgvector:pg16` service. *Why:* the review correctly weighted this highest —
-for a multi-tenant data system, *executable proof* of the boundaries (not just types) is
-the assurance that matters. Tests use tiny 8-dim vectors and never call a real
-LLM/embedding provider, so they're fast and hermetic.
-
-## Deliberately deferred (with reasoning)
-
-These are real and acknowledged, but are larger infrastructure/product decisions rather
-than self-contained code fixes; doing them badly is worse than scoping them explicitly:
-
-- **#5 (second half) LLM-credential encryption at rest / KMS envelope.** Needs a key-
-  management decision (cloud KMS vs. env master key) and rotation/audit design. API-key
-  hashing — the higher-value, self-contained half — is done.
-- **#7 (full) durable queue / outbox.** The in-process hazards are mitigated; a real
-  queue (BullMQ+Redis or a DB outbox with leases/DLQ) is an architectural addition.
-- **#14 production container/compose hardening** (multi-stage build, non-root, AOT
-  compile, private DB). Pure DevOps config, best done as its own change.
-- **#16 versioned OpenAPI contract + SDK compatibility tests.** Valuable but broad;
-  error-envelope/format tightening was partially addressed via the 403 plumbing.
-- **Runtime DNS-rebinding for #4.** The validation-time DNS check + range blocking covers
-  the common case; full runtime protection needs socket-level egress control best handled
-  at the network layer.
-
-## Verification performed
+## Verification
 
 - `npm run typecheck` — **passes**.
-- `npm test` — **30/30 pass** (`tests/url-guard.test.ts` 23, `tests/isolation.test.ts` 7),
-  against real Postgres + pgvector.
-- Full migration chain (0000→0005) applied to a **clone of the live dev DB**: keys hashed
-  in place (original key still authenticates), private-KB owner backfilled, composite FKs
-  and constraints created, ledger populated, and a re-run is a clean no-op. The live dev
-  database was not modified.
+- `npm test` — **34/34** (`isolation` 8, `url-guard` 23, `crypto` 3).
+- Migration chain `0000`–`0006` applied to a **clone of the live dev DB**: trigger,
+  owner-org FK, and recall index created; legacy cleanup ran; re-run is a clean no-op.
+  The live dev database was not modified.
+
+---
+
+# Round 3 independent verification (2026-07-01)
+
+The round-two changes were independently inspected and executed. Type checking passes,
+all 34 tests pass, and migration `0006` applies successfully to the clean test database.
+The changes are meaningful, but the claims that private-KB isolation and LLM credential
+encryption are complete remain too strong.
+
+## Verified as fixed or materially improved
+
+- A direct insert linking agent B to agent A's private KB is rejected by the new
+  database trigger.
+- A private KB's owner and organization are tied through a composite foreign key.
+- The per-user memory query now has a supporting `(agent_id, end_user_id)` index.
+- The default global body limit no longer makes the default 15 MB upload cap
+  unreachable.
+- Retrieval truncates every selected chunk, including the first, to the remaining
+  context budget.
+- HTTP server closure is awaited before the database pool is closed.
+- The test harness refuses database names that are not recognizably test-specific.
+- AES-256-GCM authenticated encryption works correctly when a master key is configured.
+- LLM client map keys no longer contain raw credentials.
+
+## Remaining P0 — Private-KB invariant can be broken through ownership changes
+
+**Status: Not fully fixed**
+
+Migration `0006` places its trigger on `agent_knowledge_bases`. It validates link
+inserts and updates, but it does not run when the linked `knowledge_bases` row changes.
+
+An existing valid state can therefore be made invalid through direct SQL:
+
+1. Private KB K is owned and linked to agent A.
+2. `knowledge_bases.agent_id` is changed from A to B.
+3. The existing link from A to K remains.
+4. Agent A's retrieval still resolves K even though K is now marked as B's private KB.
+
+A similar issue exists if a linked shared KB is converted into a private KB by changing
+`is_default` and `agent_id`: existing links are not revalidated.
+
+The current test proves only that a new illegal link is rejected. It does not test
+ownership transfer or shared-to-private conversion.
+
+### Required fix
+
+Choose one of these database-level designs:
+
+1. Make private-KB ownership immutable after creation.
+2. Add a trigger on changes to `knowledge_bases.agent_id`, `is_default`, or `org_id`
+   that rejects the update unless every resulting link is valid.
+3. Model private ownership separately from shared links so a private KB never depends
+   on a general-purpose M:N link.
+
+Add direct-DB tests for:
+
+- Changing a linked private KB's owner
+- Changing a shared KB with multiple links into a private KB
+- Changing KB organization
+- Deleting the required owner link, if every private KB must remain retrievable by its
+  owner
+
+## Remaining P0 — Legacy private-KB migration still guesses ownership
+
+**Status: Not fixed**
+
+Migration `0006` cleans illegal links only after migration `0003` has already inferred
+and stored an owner. In a legacy database where a private KB has multiple links,
+`0003` uses an `UPDATE ... FROM` join without resolving the ambiguity. PostgreSQL may
+select any matching agent as the owner.
+
+Consequences:
+
+- Ownership can be silently assigned to the wrong agent.
+- Migration `0006` may then preserve that guessed owner and delete the legitimate link.
+- If one agent is selected as owner for multiple private KBs, the unique owner index in
+  migration `0003` can fail before migration `0006` ever runs.
+
+A successful migration of one clean dev clone does not verify these corrupted-but-valid
+legacy states.
+
+### Required fix
+
+- Do not guess ownership when more than one agent is linked to a default KB.
+- Detect ambiguous rows before assigning owners.
+- Abort with a precise diagnostic or quarantine the affected KBs for explicit repair.
+- If original ownership can be derived from an authoritative source, encode and test
+  that deterministic rule.
+- Add upgrade tests that construct each legacy state before running migrations
+  `0003`–`0006`.
+
+Required fixtures:
+
+- One default KB linked to two same-org agents
+- One agent linked to its own and another agent's default KB
+- Several default KBs that could be assigned to the same agent
+- A default KB with no link
+- A historical cross-organization link created before the composite constraints
+
+## P1 — LLM credential encryption is optional and incomplete
+
+**Status: Partially fixed**
+
+The implementation provides authenticated AES-256-GCM encryption when
+`SECRET_ENCRYPTION_KEY` is configured. This protects newly written LLM credentials in
+a database dump.
+
+The report should not call this envelope encryption. It is direct symmetric encryption
+with a key derived by SHA-256 from one configured string; there is no per-record data
+encryption key wrapped by a KMS key.
+
+Remaining defects:
+
+- With no `SECRET_ENCRYPTION_KEY`, credentials are stored in plaintext.
+- Production startup does not require an encryption key.
+- Existing plaintext credentials are accepted but never migrated or re-encrypted.
+- There is no key identifier, rotation, or multi-key decryption support.
+- Any arbitrary-length string is accepted as the master secret; production should
+  require a high-entropy key.
+- A plaintext legacy credential beginning with `enc:v1:` is interpreted as ciphertext.
+
+### Required fix
+
+1. Fail production startup when tenant credentials are supported but no encryption key
+   is configured.
+2. Require a randomly generated 32-byte key in an explicit encoding, or integrate a
+   cloud KMS.
+3. Add a versioned key identifier to ciphertext.
+4. Support old and new keys during rotation.
+5. Add a migration or controlled re-encryption job for existing plaintext values.
+6. Test missing keys, wrong keys, tampering, malformed ciphertext, legacy migration,
+   and rotation.
+
+## P1 — Cached clients still retain credentials
+
+**Status: Partially fixed**
+
+Hashing the cache-map key removes the raw secret from the map key, which is good.
+However, each cached OpenAI or Anthropic SDK client must retain the actual credential in
+memory to authenticate future calls. Because clients are cached without eviction, the
+secret remains in process memory for the cache lifetime rather than existing only “at
+call time.”
+
+Required improvement: use a bounded cache with expiry and explicit invalidation when an
+organization rotates or clears credentials. Document that process-memory compromise is
+outside encryption-at-rest protection.
+
+## P2 — Upload cap still has a configurable edge case
+
+**Status: Improved, small issue remains**
+
+The default 20 MB body limit leaves room for the 15 MB file cap. When an operator sets
+`MAX_BODY_BYTES` below 15 MB, however, the file cap becomes exactly equal to the entire
+body limit. Multipart framing consumes additional bytes, so the global middleware can
+still reject a file before the route-specific limit is reached.
+
+Reserve explicit multipart overhead or validate at startup that the global limit exceeds
+the maximum file size by a documented margin.
+
+## P2 — Graceful shutdown needs a deadline
+
+**Status: Materially improved**
+
+The server is now awaited before the database closes, correcting the original ordering
+bug. A stuck connection can still make shutdown wait indefinitely because no forced
+deadline exists.
+
+Add a configurable shutdown deadline, abort remaining connections after it expires, and
+exit non-zero when graceful draining fails.
+
+## Round 3 verdict
+
+The round-two remediation earns a modest increase from **72 to 75**, while remaining in
+the **C+** band. The direct private-link hole is closed, crypto capability and shutdown
+ordering are improved, and the test suite is stronger.
+
+Promotion to B still requires:
+
+1. Enforcing private-KB invariants when either links **or KB ownership fields** change.
+2. Replacing ambiguous legacy ownership guessing with deterministic repair or a safe
+   migration failure.
+3. Making credential encryption mandatory and migratable in production.
+4. Completing trusted end-user identity and runtime/network SSRF controls.
+5. Adding durable jobs, quotas, production deployment hardening, and operational
+   telemetry.

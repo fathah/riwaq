@@ -51,13 +51,21 @@ async function main() {
     console.log(`[riwaq] listening on http://localhost:${info.port}`)
   })
 
-  // Graceful shutdown: stop accepting connections, then drain the DB pool.
+  // Graceful shutdown: stop accepting new connections, WAIT for in-flight requests
+  // to finish, then drain the DB pool. `server.close` signals completion via its
+  // callback, so we await it before touching the database.
   let closing = false
   const shutdown = async (signal: string) => {
     if (closing) return
     closing = true
     console.log(`[riwaq] ${signal} received, shutting down`)
-    server.close()
+    try {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      )
+    } catch (err) {
+      console.error('[riwaq] error closing HTTP server', err)
+    }
     try {
       await sql.end({ timeout: 5 })
     } catch (err) {

@@ -7,6 +7,11 @@ const TEST_DB_URL = process.env.TEST_DATABASE_URL || 'postgres://fathah@localhos
 function adminUrlAndName(url: string): { adminUrl: string; dbName: string } {
   const u = new URL(url)
   const dbName = u.pathname.replace(/^\//, '')
+  // Safety rail: we DROP this database. Refuse anything not clearly a test database,
+  // so a misconfigured TEST_DATABASE_URL can never destroy a real one.
+  if (!/(^|_)test($|_)/.test(dbName)) {
+    throw new Error(`refusing to use non-test database '${dbName}' — its name must contain "test"`)
+  }
   u.pathname = '/postgres'
   return { adminUrl: u.toString(), dbName }
 }

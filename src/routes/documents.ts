@@ -7,14 +7,17 @@ import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg, getKbInOrg } from '../db/guards'
 import { parseToText } from '../lib/parse'
 import { ingestText } from '../services/ingest'
+import { env } from '../env'
 import type { AppEnv } from '../types'
 
 export const documentsRoute = new Hono<AppEnv>()
 documentsRoute.use('*', orgAuth)
 
 // Bound ingestion work: cap raw upload bytes and the extracted-text length so a
-// single tenant can't exhaust memory or run away on embedding cost.
-const MAX_UPLOAD_BYTES = 15 * 1024 * 1024 // 15 MB raw file
+// single tenant can't exhaust memory or run away on embedding cost. The upload cap
+// is clamped below the global body limit so a large file is never silently rejected
+// at the server boundary before this route's friendlier 413 can fire.
+const MAX_UPLOAD_BYTES = Math.min(15 * 1024 * 1024, env.MAX_BODY_BYTES)
 const MAX_TEXT_CHARS = 5_000_000 // ~5 MB of extracted text
 const MAX_NAME_LEN = 300
 

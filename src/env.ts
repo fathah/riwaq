@@ -41,8 +41,13 @@ const schema = z.object({
     .enum(['0', '1', 'true', 'false'])
     .default('0')
     .transform((v) => v === '1' || v === 'true'),
-  // Max accepted request body size in bytes (protects parsing + memory). Default 10 MB.
-  MAX_BODY_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+  // Master key for encrypting tenant LLM credentials at rest (AES-256-GCM). Any
+  // string; empty → secrets stored as plaintext (dev only). Set in production.
+  SECRET_ENCRYPTION_KEY: z.string().default(''),
+  // Max accepted request body size in bytes (protects parsing + memory). Must stay
+  // above the document upload cap (15 MB, see routes/documents.ts) or file uploads
+  // would be rejected at the global boundary before reaching that route. Default 20 MB.
+  MAX_BODY_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
 
   // --- Retrieval tuning ---
   // Drop retrieved chunks below this cosine similarity (0..1). 0 = keep all.

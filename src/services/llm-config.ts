@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { organizations } from '../db/schema'
 import { env } from '../env'
+import { decryptSecret } from '../lib/crypto'
 import { DEFAULT_MODEL, type LlmConfig, type Provider } from '../lib/llm'
 
 type AgentOverride = { provider: string | null; model: string | null }
@@ -46,9 +47,10 @@ export async function resolveLlmConfig(orgId: string, agent?: AgentOverride): Pr
   const baseURL =
     (orgApplies ? org?.baseUrl : null) || (provider === 'openai' ? env.OPENAI_BASE_URL : undefined)
 
-  const apiKey =
-    (orgApplies ? org?.apiKey : null) ||
-    (provider === 'openai' ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY)
+  // The org's stored LLM key is encrypted at rest — decrypt it here, in-process,
+  // only when it actually applies to this call.
+  const orgApiKey = orgApplies && org?.apiKey ? decryptSecret(org.apiKey) : null
+  const apiKey = orgApiKey || (provider === 'openai' ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY)
 
   return { provider, model, apiKey, ...(baseURL ? { baseURL } : {}) }
 }

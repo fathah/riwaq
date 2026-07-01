@@ -6,6 +6,7 @@ import { organizations } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { generateApiKey, hashApiKey, apiKeyPrefix } from '../lib/api-key'
 import { assertPublicUrl, UnsafeUrlError } from '../lib/url-guard'
+import { encryptSecret } from '../lib/crypto'
 import { env } from '../env'
 import type { AppEnv } from '../types'
 
@@ -92,7 +93,9 @@ organizationsRoute.put('/organizations/llm', orgAuth, async (c) => {
   const patch: Record<string, string | null> = {}
   if ('provider' in parsed.data) patch.llmProvider = parsed.data.provider ?? null
   if ('baseUrl' in parsed.data) patch.llmBaseUrl = parsed.data.baseUrl ?? null
-  if ('apiKey' in parsed.data) patch.llmApiKey = parsed.data.apiKey ?? null
+  // Encrypt the tenant LLM key at rest (no-op passthrough when no master key is set).
+  if ('apiKey' in parsed.data)
+    patch.llmApiKey = parsed.data.apiKey ? encryptSecret(parsed.data.apiKey) : null
   if ('model' in parsed.data) patch.llmModel = parsed.data.model ?? null
 
   if (Object.keys(patch).length === 0) return c.json({ error: 'no fields to update' }, 400)

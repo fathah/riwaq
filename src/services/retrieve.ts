@@ -56,14 +56,16 @@ export async function searchChunks(
   // Post-filter: drop weakly-relevant chunks (reduces cost + prompt-injection
   // surface), then pack under a character budget so the prompt can't grow
   // unbounded. Threshold defaults off (0) so retrieval never regresses until tuned.
+  // The total injected content never exceeds the budget — even a single oversized
+  // top hit is truncated rather than blowing past it.
   const out: RetrievedChunk[] = []
   let budget = env.RETRIEVAL_CHAR_BUDGET
   for (const r of rows) {
     if (r.similarity < env.RETRIEVAL_MIN_SIMILARITY) continue
-    if (out.length > 0 && r.content.length > budget) continue // always keep the top hit
-    out.push(r)
-    budget -= r.content.length
     if (budget <= 0) break
+    const content = r.content.length > budget ? r.content.slice(0, budget) : r.content
+    out.push({ ...r, content })
+    budget -= content.length
   }
   return out
 }

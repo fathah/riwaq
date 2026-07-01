@@ -1,5 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
+import { createHash } from 'node:crypto'
+
+// Cache key that doesn't retain the raw credential as a plaintext map key.
+const cacheKey = (cfg: { baseURL?: string; apiKey: string }) =>
+  createHash('sha256').update(`${cfg.baseURL ?? ''}|${cfg.apiKey}`).digest('hex')
 
 // Two inference backends behind one interface. `openai` targets ANY
 // OpenAI-compatible endpoint (OpenAI, OpenRouter, Groq, Together, Ollama, vLLM,
@@ -62,7 +67,7 @@ export const DEFAULT_MODEL: Record<Provider, string> = {
 const anthropicCache = new Map<string, Anthropic>()
 function anthropicClient(cfg: LlmConfig): Anthropic {
   if (!cfg.apiKey) throw new Error('No API key for the anthropic provider (set the org LLM key or ANTHROPIC_API_KEY).')
-  const k = `${cfg.baseURL ?? ''}|${cfg.apiKey}`
+  const k = cacheKey(cfg)
   let c = anthropicCache.get(k)
   if (!c) {
     c = new Anthropic({ apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) })
@@ -74,7 +79,7 @@ function anthropicClient(cfg: LlmConfig): Anthropic {
 const openaiCache = new Map<string, OpenAI>()
 function openaiClient(cfg: LlmConfig): OpenAI {
   if (!cfg.apiKey) throw new Error('No API key for the openai provider (set the org LLM key or OPENAI_API_KEY).')
-  const k = `${cfg.baseURL ?? ''}|${cfg.apiKey}`
+  const k = cacheKey(cfg)
   let c = openaiCache.get(k)
   if (!c) {
     c = new OpenAI({ apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) })

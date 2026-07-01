@@ -97,6 +97,18 @@ describe('private knowledge base isolation (P0 #1)', () => {
     ).rejects.toThrow()
   })
 
+  it('the database blocks a direct same-org cross-agent private link (trigger)', async () => {
+    const org = await createOrg('org')
+    const a = await createAgent(org.key, 'a')
+    const b = await createAgent(org.key, 'b')
+
+    // Agent B → agent A's PRIVATE KB, same org, correct org_id (so the composite
+    // FKs are satisfied). Only the trigger stands between this and a data leak.
+    await expect(
+      db.insert(agentKnowledgeBases).values({ agentId: b.id, knowledgeBaseId: a.privateKbId, orgId: org.id }),
+    ).rejects.toThrow()
+  })
+
   it('the database forbids a cross-org agent↔KB link', async () => {
     const orgA = await createOrg('orgA')
     const orgB = await createOrg('orgB')
