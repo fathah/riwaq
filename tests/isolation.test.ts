@@ -1,11 +1,13 @@
 import { beforeAll, afterAll, describe, it, expect } from 'vitest'
 import { eq } from 'drizzle-orm'
 import { app } from '../src/index'
-import { migrate } from '../src/db/migrate'
+import { assertLegacyPrivateKbOwnershipIsUnambiguous, migrate } from '../src/db/migrate'
 import { db, sql } from '../src/db/client'
-import { agents, agentKnowledgeBases, conversations, knowledgeBases, memories } from '../src/db/schema'
+import { agents, agentKnowledgeBases, conversations, knowledgeBases, memories, organizations } from '../src/db/schema'
 import { recallMemories } from '../src/services/memory'
 import { prepareChatTurn, ChatError } from '../src/services/chat'
+import { encryptLegacyLlmSecrets } from '../src/services/secrets'
+import { decryptSecret } from '../src/lib/crypto'
 
 // One-hot 8-dim vectors (EMBEDDING_DIM=8 in test env) — distinct but valid.
 const vec = (seed = 0) => Array.from({ length: 8 }, (_, i) => (i === seed ? 1 : 0))
@@ -109,6 +111,68 @@ describe('private knowledge base isolation (P0 #1)', () => {
     ).rejects.toThrow()
   })
 
+  it('the database blocks changing a linked private KB owner', async () => {
+    const org = await createOrg('owner-mutation-org')
+    const a = await createAgent(org.key, 'owner-a')
+    const [b] = await db
+      .insert(agents)
+      .values({ orgId: org.id, name: 'owner-b-without-private-kb' })
+      .returning({ id: agents.id })
+
+    await expect(
+      db
+        .update(knowledgeBases)
+        .set({ agentId: b!.id })
+        .where(eq(knowledgeBases.id, a.privateKbId)),
+    ).rejects.toThrow()
+  })
+
+  it('the database blocks converting a multiply-linked shared KB to private', async () => {
+    const org = await createOrg('shared-mutation-org')
+    const a = await createAgent(org.key, 'shared-a')
+    const [b] = await db
+      .insert(agents)
+      .values({ orgId: org.id, name: 'shared-b-without-private-kb' })
+      .returning({ id: agents.id })
+    const shared = await api('POST', '/knowledge-bases', org.key, { name: 'shared' })
+
+    expect((await api('POST', `/agents/${a.id}/knowledge-bases`, org.key, { knowledgeBaseId: shared.json.id })).status).toBe(201)
+    await db
+      .insert(agentKnowledgeBases)
+      .values({ agentId: b!.id, knowledgeBaseId: shared.json.id, orgId: org.id })
+
+    await expect(
+      db
+        .update(knowledgeBases)
+        .set({ isDefault: true, agentId: b!.id })
+        .where(eq(knowledgeBases.id, shared.json.id)),
+    ).rejects.toThrow()
+  })
+
+  it('legacy ownership preflight refuses ambiguous private-KB links', async () => {
+    const org = await createOrg('legacy-ambiguity-org')
+    const a = await createAgent(org.key, 'legacy-a')
+    const b = await createAgent(org.key, 'legacy-b')
+
+    await sql`ALTER TABLE agent_knowledge_bases DISABLE TRIGGER USER`
+    try {
+      await db
+        .insert(agentKnowledgeBases)
+        .values({ agentId: b.id, knowledgeBaseId: a.privateKbId, orgId: org.id })
+      await expect(assertLegacyPrivateKbOwnershipIsUnambiguous()).rejects.toThrow(
+        /cannot infer private knowledge-base ownership safely/i,
+      )
+      await db
+        .delete(agentKnowledgeBases)
+        .where(eq(agentKnowledgeBases.knowledgeBaseId, a.privateKbId))
+      await db
+        .insert(agentKnowledgeBases)
+        .values({ agentId: a.id, knowledgeBaseId: a.privateKbId, orgId: org.id })
+    } finally {
+      await sql`ALTER TABLE agent_knowledge_bases ENABLE TRIGGER USER`
+    }
+  })
+
   it('the database forbids a cross-org agent↔KB link', async () => {
     const orgA = await createOrg('orgA')
     const orgB = await createOrg('orgB')
@@ -170,5 +234,30 @@ describe('conversation identity binding (P0 #3)', () => {
         conversationId: '00000000-0000-0000-0000-000000000000',
       }),
     ).rejects.toBeInstanceOf(ChatError)
+  })
+})
+
+describe('LLM credential encryption at rest', () => {
+  it('migrates an existing plaintext credential and records encrypted state', async () => {
+    const org = await createOrg('legacy-secret-org')
+    await db
+      .update(organizations)
+      .set({ llmApiKey: 'legacy-plaintext-secret', llmApiKeyEncrypted: false })
+      .where(eq(organizations.id, org.id))
+
+    expect(await encryptLegacyLlmSecrets()).toBeGreaterThanOrEqual(1)
+
+    const [stored] = await db
+      .select({
+        apiKey: organizations.llmApiKey,
+        encrypted: organizations.llmApiKeyEncrypted,
+      })
+      .from(organizations)
+      .where(eq(organizations.id, org.id))
+      .limit(1)
+
+    expect(stored!.encrypted).toBe(true)
+    expect(stored!.apiKey).not.toContain('legacy-plaintext-secret')
+    expect(decryptSecret(stored!.apiKey!, stored!.encrypted)).toBe('legacy-plaintext-secret')
   })
 })

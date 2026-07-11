@@ -27,6 +27,7 @@ export const organizations = pgTable('organizations', {
   llmProvider: text('llm_provider'), // 'anthropic' | 'openai'
   llmBaseUrl: text('llm_base_url'), // OpenAI-compatible base URL
   llmApiKey: text('llm_api_key'), // key for the org's chosen provider/endpoint
+  llmApiKeyEncrypted: boolean('llm_api_key_encrypted').notNull().default(false),
   llmModel: text('llm_model'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
@@ -157,4 +158,15 @@ export const questionLogs = pgTable('question_logs', {
   topicId: uuid('topic_id').references(() => topics.id, { onDelete: 'set null' }),
   embedding: vector('embedding', { dimensions: EMBEDDING_DIM }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const organizationUsage = pgTable('organization_usage', {
+  orgId: uuid('org_id')
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  chatRequests: integer('chat_requests').notNull().default(0),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  estimatedCostMicros: integer('estimated_cost_micros').notNull().default(0),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 })

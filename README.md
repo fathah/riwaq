@@ -71,6 +71,10 @@ curl localhost:3000/health      # {"ok":true}
 - `POST /organizations` is **public** and returns an **API key once** — store it.
 - Every other endpoint requires `Authorization: Bearer <key>`. The key resolves to a
   single org, and all queries are scoped to it, so tenants can't see each other's data.
+- In production, chat also requires `X-End-User-Token`: a short-lived HMAC token signed
+  by the organization's trusted backend. Its `{ sub, orgId, exp }` claims bind memory
+  and conversation access to an authenticated end user; request-body `endUserId` is
+  accepted only outside production.
 
 ---
 
@@ -99,6 +103,7 @@ curl -sX POST $B/agents/$AGENT/documents -H "authorization: Bearer $KEY" -F file
 # 4. Chat
 curl -sX POST $B/agents/$AGENT/chat -H "authorization: Bearer $KEY" \
   -H 'content-type: application/json' \
+  -H "X-End-User-Token: $END_USER_TOKEN" \
   -d '{"endUserId":"u_123","message":"What is the refund window?"}'
 # → { conversationId, answer, citations:[...], model, usage, finishReason }   (canonical shape)
 #   add ?stream=1 for SSE (events: meta → token → done)
@@ -221,7 +226,11 @@ analytics pipeline runs underneath.
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:3000/v1", api_key="riwaq_...")
+client = OpenAI(
+    base_url="http://localhost:3000/v1",
+    api_key="riwaq_...",
+    default_headers={"X-End-User-Token": "<signed token>"},
+)
 
 client.models.list()          # your agents, listed as models
 
@@ -257,6 +266,7 @@ Works out of the box with the `openai` SDKs, LangChain, OpenWebUI, LibreChat, an
 | ------ | ----------------------------------------- | --------------------------------------------------------------------------------- |
 | POST   | `/organizations`                          | **public**; returns `apiKey` once                                                 |
 | GET    | `/organizations/me`                       | current org + LLM config (key masked)                                             |
+| GET    | `/organizations/usage`                    | persistent token/spend usage + live storage counts and ceilings                   |
 | PUT    | `/organizations/llm`                      | set org LLM config `{ provider?, baseUrl?, apiKey?, model? }` (null clears)       |
 | POST   | `/agents`                                 | `{ name, systemPrompt?, provider?, model? }`; auto-creates the agent's private KB |
 | GET    | `/agents/:id`                             | agent + linked KBs                                                                |
@@ -275,6 +285,9 @@ Works out of the box with the `openai` SDKs, LangChain, OpenWebUI, LibreChat, an
 | POST   | `/v1/chat/completions`                    | OpenAI-compatible; `model` = agent id/name; `stream` supported                    |
 | GET    | `/v1/models`                              | the org's agents, as OpenAI models                                                |
 | GET    | `/health`                                 | DB ping                                                                           |
+| GET    | `/ready`                                  | DB + configured Redis/Dragonfly readiness                                         |
+| GET    | `/openapi.json`                           | versioned OpenAPI 3.1 contract                                                    |
+| GET    | `/metrics`                                | admin-token-protected Prometheus metrics                                          |
 
 ---
 
@@ -336,6 +349,18 @@ endpoint, **or** a local offline model (transformers.js) — no key required.
 | `EMBEDDINGS_API_KEY`   | for voyage/openai      | embeddings key (not needed for `local`)                                 |
 | `EMBEDDINGS_BASE_URL`  | no                     | `/v1` server for the `openai` embeddings provider                       |
 | `EMBEDDING_DIM`        | no                     | vector dimension, locked at first migration (default 384)               |
+| `SECRET_ENCRYPTION_KEY` | production            | canonical base64 32-byte AES-256-GCM key                                |
+| `END_USER_SIGNING_SECRET` | production          | base64 32+ byte HMAC key for trusted end-user tokens                     |
+| `LLM_ALLOWED_HOSTS`    | production             | comma-separated outbound provider hostname allowlist                    |
+| `REDIS_URL`            | production             | Redis/Dragonfly URL for durable jobs, shared limits, and caches          |
+| `ADMIN_TOKEN`          | production             | gates organization provisioning and the metrics endpoint                |
+| `RATE_LIMIT_PER_ORG`   | no                     | requests per organization per window (default 120)                      |
+| `MAX_CONCURRENT_REQUESTS_PER_ORG` | no          | per-node concurrent request cap per organization (default 20)           |
+| `SHUTDOWN_TIMEOUT_MS`  | no                     | maximum graceful HTTP drain time (default 15000)                        |
+| `ORG_MAX_TOTAL_TOKENS` | no                     | persistent per-org token ceiling (default 10,000,000)                   |
+| `ORG_MAX_ESTIMATED_COST_MICROS` | no            | persistent estimated-spend ceiling                                     |
+| `ORG_MAX_DOCUMENTS`    | no                     | live per-org document ceiling                                           |
+| `ORG_MAX_STORED_CHARS` | no                     | live chunk-content storage ceiling                                      |
 | `PORT`                 | no                     | HTTP port (default 3000)                                                |
 
 ## Development
@@ -354,6 +379,12 @@ Working: tenancy + org auth, agents with auto private KB, shared KBs, ingestion
 endpoint), native + inbound-OpenAI-compatible chat (with streaming), per-agent memory,
 topic analytics, feedback.
 
-Deferred (see [plan.md](plan.md) §11): finer KB access control (read-only shared KBs),
-rate limiting/quotas, a durable job queue for ingestion, retrieval re-ranking, and
-conversation summarization.
+Production controls now include signed end-user identity, encrypted tenant credentials,
+explicit provider allowlists, admin-gated provisioning, per-org rate/concurrency limits,
+request-time destination revalidation, persistent token/spend/storage governance,
+Redis/Dragonfly-backed durable ingestion and learning, readiness, request IDs, structured
+request logs, queue-aware Prometheus metrics, OpenAPI 3.1, bounded shutdown, and a non-root image.
+
+Still deferred (see [TODO.md](TODO.md)): read-only shared-KB permissions, infrastructure
+egress enforcement/connection pinning, retrieval re-ranking, conversation summarization,
+distributed tracing/dashboards, and dated load, restore, and rotation drill evidence.

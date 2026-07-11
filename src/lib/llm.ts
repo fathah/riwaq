@@ -1,10 +1,44 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { createHash } from 'node:crypto'
+import { env } from '../env'
 
 // Cache key that doesn't retain the raw credential as a plaintext map key.
 const cacheKey = (cfg: { baseURL?: string; apiKey: string }) =>
   createHash('sha256').update(`${cfg.baseURL ?? ''}|${cfg.apiKey}`).digest('hex')
+
+type CachedClient<T> = { client: T; touchedAt: number }
+
+function getCachedClient<T>(cache: Map<string, CachedClient<T>>, key: string): T | undefined {
+  const entry = cache.get(key)
+  if (!entry) return undefined
+  if (Date.now() - entry.touchedAt > env.LLM_CLIENT_CACHE_TTL_SECONDS * 1000) {
+    cache.delete(key)
+    return undefined
+  }
+  entry.touchedAt = Date.now()
+  return entry.client
+}
+
+function cacheClient<T>(cache: Map<string, CachedClient<T>>, key: string, client: T): void {
+  const now = Date.now()
+  for (const [cachedKey, entry] of cache) {
+    if (now - entry.touchedAt > env.LLM_CLIENT_CACHE_TTL_SECONDS * 1000) cache.delete(cachedKey)
+  }
+  while (cache.size >= env.LLM_CLIENT_CACHE_MAX) {
+    let oldestKey: string | undefined
+    let oldest = Infinity
+    for (const [cachedKey, entry] of cache) {
+      if (entry.touchedAt < oldest) {
+        oldest = entry.touchedAt
+        oldestKey = cachedKey
+      }
+    }
+    if (!oldestKey) break
+    cache.delete(oldestKey)
+  }
+  cache.set(key, { client, touchedAt: now })
+}
 
 // Two inference backends behind one interface. `openai` targets ANY
 // OpenAI-compatible endpoint (OpenAI, OpenRouter, Groq, Together, Ollama, vLLM,
@@ -64,26 +98,33 @@ export const DEFAULT_MODEL: Record<Provider, string> = {
 
 // Clients are cached by (baseURL, apiKey) so per-org credentials don't rebuild a
 // client on every call, while still isolating one org's endpoint from another's.
-const anthropicCache = new Map<string, Anthropic>()
+const anthropicCache = new Map<string, CachedClient<Anthropic>>()
+const openaiCache = new Map<string, CachedClient<OpenAI>>()
+
+/** Drop cached SDK clients after credential or endpoint rotation. */
+export function clearLlmClientCache(): void {
+  anthropicCache.clear()
+  openaiCache.clear()
+}
+
 function anthropicClient(cfg: LlmConfig): Anthropic {
   if (!cfg.apiKey) throw new Error('No API key for the anthropic provider (set the org LLM key or ANTHROPIC_API_KEY).')
   const k = cacheKey(cfg)
-  let c = anthropicCache.get(k)
+  let c = getCachedClient(anthropicCache, k)
   if (!c) {
     c = new Anthropic({ apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) })
-    anthropicCache.set(k, c)
+    cacheClient(anthropicCache, k, c)
   }
   return c
 }
 
-const openaiCache = new Map<string, OpenAI>()
 function openaiClient(cfg: LlmConfig): OpenAI {
   if (!cfg.apiKey) throw new Error('No API key for the openai provider (set the org LLM key or OPENAI_API_KEY).')
   const k = cacheKey(cfg)
-  let c = openaiCache.get(k)
+  let c = getCachedClient(openaiCache, k)
   if (!c) {
     c = new OpenAI({ apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) })
-    openaiCache.set(k, c)
+    cacheClient(openaiCache, k, c)
   }
   return c
 }

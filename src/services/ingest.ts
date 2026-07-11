@@ -5,41 +5,52 @@ import { chunkText } from '../lib/chunk'
 import { embed } from '../lib/embeddings'
 
 /**
- * Parse-already-done → chunk → embed → store. Runs in the background after the
- * upload endpoint has returned. Flips the document's status to ready/error.
- *
- * Idempotent + atomic: any prior chunks for this document are cleared first (so a
- * retry never duplicates), and the chunk insert + status flip happen in ONE
- * transaction (so a crash can't leave "ready" with missing chunks, or orphan
- * chunks under a still-"processing" row).
+ * Core ingestion: parse-already-done → chunk → embed → store. THROWS on failure
+ * (so a durable queue can retry it). Idempotent + atomic: any prior chunks for the
+ * document are cleared first (a retry never duplicates), and the chunk insert +
+ * status flip happen in ONE transaction (a crash can't leave "ready" with missing
+ * chunks, or orphan chunks under a still-"processing" row).
+ */
+export async function performIngest(documentId: string, knowledgeBaseId: string, text: string): Promise<void> {
+  const pieces = chunkText(text)
+
+  // Embedding is the slow, external step — do it BEFORE opening the transaction so
+  // we don't hold a DB transaction open across a network round-trip.
+  const vectors = pieces.length > 0 ? await embed(pieces, 'document') : []
+
+  await db.transaction(async (tx) => {
+    await tx.delete(chunks).where(eq(chunks.documentId, documentId))
+    if (pieces.length > 0) {
+      await tx.insert(chunks).values(
+        pieces.map((content, i) => ({
+          documentId,
+          knowledgeBaseId,
+          content,
+          embedding: vectors[i]!,
+          metadata: { index: i },
+        })),
+      )
+    }
+    await tx.update(documents).set({ status: 'ready' }).where(eq(documents.id, documentId))
+  })
+  console.log(`[ingest] document ${documentId}: ${pieces.length} chunks ready`)
+}
+
+/** Mark a document failed (after retries are exhausted / in-process failure). */
+export async function markIngestFailed(documentId: string): Promise<void> {
+  await db.update(documents).set({ status: 'error' }).where(eq(documents.id, documentId))
+}
+
+/**
+ * In-process fallback used when no durable queue is configured: run once,
+ * fire-and-forget, and flip status to error on failure (no retry).
  */
 export async function ingestText(documentId: string, knowledgeBaseId: string, text: string): Promise<void> {
   try {
-    const pieces = chunkText(text)
-
-    // Embedding is the slow, external step — do it BEFORE opening the transaction
-    // so we don't hold a DB transaction open across a network round-trip.
-    const vectors = pieces.length > 0 ? await embed(pieces, 'document') : []
-
-    await db.transaction(async (tx) => {
-      await tx.delete(chunks).where(eq(chunks.documentId, documentId))
-      if (pieces.length > 0) {
-        await tx.insert(chunks).values(
-          pieces.map((content, i) => ({
-            documentId,
-            knowledgeBaseId,
-            content,
-            embedding: vectors[i]!,
-            metadata: { index: i },
-          })),
-        )
-      }
-      await tx.update(documents).set({ status: 'ready' }).where(eq(documents.id, documentId))
-    })
-    console.log(`[ingest] document ${documentId}: ${pieces.length} chunks ready`)
+    await performIngest(documentId, knowledgeBaseId, text)
   } catch (err) {
     console.error(`[ingest] document ${documentId} failed`, err)
-    await db.update(documents).set({ status: 'error' }).where(eq(documents.id, documentId))
+    await markIngestFailed(documentId)
   }
 }
 

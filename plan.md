@@ -104,7 +104,9 @@ extract memory, classify topic, update counters) runs *after* the response is se
   (OpenAI via its `dimensions` param; Voyage = 1024). Never mix dims in one DB.
 - **File parsing (start small):** PDF (`pdf-parse`), TXT, MD. Later: DOCX (`mammoth`), CSV.
 - **Validation:** `zod` on every endpoint body.
-- **Background jobs (v1):** in-process fire-and-forget. Upgrade path: BullMQ + Redis.
+- **Background jobs:** BullMQ + Redis/Dragonfly in production, with idempotency keys,
+  retries, exponential backoff, and retained failed jobs. Development can use the
+  explicitly non-durable in-process fallback.
 
 ---
 
@@ -262,15 +264,16 @@ POST /v1/chat/completions
 ## 6. Data model (Postgres + pgvector)
 
 ```
-organizations         id, name, api_key,
-                      llm_provider, llm_base_url, llm_api_key, llm_model,   -- per-org LLM (nullable → .env)
+organizations         id, name, api_key_hash, api_key_prefix,
+                      llm_provider, llm_base_url, llm_api_key, llm_api_key_encrypted,
+                      llm_model,   -- per-org LLM (nullable → .env)
                       created_at
 
 agents                id, org_id→, name, system_prompt,
                       provider, model,   -- nullable per-agent overrides (null → inherit org/.env)
                       created_at
 
-knowledge_bases       id, org_id→, name, is_default(bool), created_at
+knowledge_bases       id, org_id→, agent_id→(private owner), name, is_default(bool), created_at
                       -- is_default = the private KB auto-made for one agent
 
 agent_knowledge_bases agent_id→, knowledge_base_id→        -- M:N link (PK = both)
@@ -279,16 +282,17 @@ documents             id, knowledge_base_id→, name, source,
                       status(processing|ready|error), created_at
 
 chunks                id, document_id→, knowledge_base_id→, content,
-                      embedding vector(1024), metadata jsonb
+                      embedding vector(EMBEDDING_DIM), metadata jsonb
                       -- scoped to KB, NOT to agent
 
 conversations         id, agent_id→, end_user_id, summary, created_at
 messages              id, conversation_id→, role(user|assistant), content,
                       used_chunk_ids uuid[], feedback(null|up|down), tokens, created_at
 memories              id, agent_id→, end_user_id(nullable), fact,
-                      embedding vector(1024), updated_at
-topics                id, agent_id→, label, centroid vector(1024), count, last_seen
-question_logs         id, agent_id→, message_id→, topic_id→, embedding vector(1024), created_at
+                      embedding vector(EMBEDDING_DIM), updated_at
+topics                id, agent_id→, label, centroid vector(EMBEDDING_DIM), count, last_seen
+question_logs         id, agent_id→, message_id→(unique), topic_id→,
+                      embedding vector(EMBEDDING_DIM), created_at
 ```
 
 **Key relationships**
@@ -317,8 +321,8 @@ Btree on all FKs and on `agent_knowledge_bases(agent_id)`. Migration must
 8. Persist user + assistant messages (+ `used_chunk_ids`). Return response with
    citations (each citation resolves chunk → document → KB name, so the user sees
    whether an answer came from private or shared knowledge).
-9. **Async learning:** extract memory (per-agent) → upsert; classify topic (nearest
-   centroid above threshold, else new); increment `topics.count`; write `question_logs`.
+9. **Durable learning:** enqueue memory extraction + topic classification. Jobs retry
+   with idempotency by user-message ID; topic creation is serialized per agent.
 
 ---
 
@@ -336,9 +340,11 @@ Btree on all FKs and on `agent_knowledge_bases(agent_id)`. Migration must
 
 ## 9. Docker setup
 
-- **`docker-compose.yml`:** `db` (pgvector/pgvector:pg16, healthcheck, volume) + `api`
-  (depends_on db healthy; dev hot-reload via `tsx watch`).
-- **`Dockerfile`:** multi-stage — deps → build → slim runtime (`node:20-slim`).
+- **`docker-compose.yml`:** development stack with Postgres, Dragonfly, and API.
+- **`docker-compose.prod.yml`:** internal DB/cache networking, required production
+  secrets and allowlist, admin-gated provisioning, and no source mounts.
+- **`Dockerfile`:** production-only dependencies, narrow source copy, non-root user,
+  slim runtime (`node:20-slim`).
 - **First run:** `docker compose up` → API waits for DB → migrations → ready.
 - **Env (`.env.example`):**
   ```
@@ -352,18 +358,18 @@ Btree on all FKs and on `agent_knowledge_bases(agent_id)`. Migration must
 
 ## 10. Build order (milestones)
 
-- [ ] **M0 — Scaffold.** Hono app, Docker (api + pgvector), `/health`, env loader.
-- [ ] **M1 — Tenancy + CRUD.** Schema, migrations (incl. `vector` ext), orgs, agents
+- [x] **M0 — Scaffold.** Hono app, Docker (api + pgvector), `/health`, env loader.
+- [x] **M1 — Tenancy + CRUD.** Schema, migrations (incl. `vector` ext), orgs, agents
       (with auto private-KB), knowledge_bases, agent↔KB linking.
-- [ ] **M2 — Ingestion.** Upload into a KB → parse → chunk → embed → store; status
+- [x] **M2 — Ingestion.** Upload into a KB → parse → chunk → embed → store; status
       lifecycle; list/delete; agent convenience route → private KB.
-- [ ] **M3 — Retrieval.** Resolve agent KB set → top-k across private + shared, tested
+- [x] **M3 — Retrieval.** Resolve agent KB set → top-k across private + shared, tested
       in isolation (seed two KBs, assert an agent only sees its linked set).
-- [ ] **M4 — Chat.** Retrieve + history → Claude → answer + citations (with KB/source);
+- [x] **M4 — Chat.** Retrieve + history → Claude → answer + citations (with KB/source);
       persist messages; optional SSE stream.
-- [ ] **M5 — Long-term memory.** Per-agent extraction + upsert; recall + injection.
-- [ ] **M6 — Analytics.** Per-agent topic clustering + `top-questions`.
-- [ ] **M7 — Feedback.** `feedback` endpoint + KB-gap flagging.
+- [x] **M5 — Long-term memory.** Per-agent extraction + upsert; recall + injection.
+- [x] **M6 — Analytics.** Per-agent topic clustering + `top-questions`.
+- [x] **M7 — Feedback.** `feedback` endpoint + KB-gap flagging.
 
 Ship M0–M4 as the usable core; M5–M7 are the "learning" layer.
 
@@ -371,11 +377,31 @@ Ship M0–M4 as the usable core; M5–M7 are the "learning" layer.
 
 ## 11. Open questions / deferred
 
-- **Auth & API keys per org** — not in v1; required before real deployment (every
-  request must be scoped to an org so tenants can't read each other's KBs/agents).
+- Organization API keys and signed end-user identity are implemented. Future identity
+  work may add OIDC/JWKS as an alternative to the current shared HMAC trust boundary.
 - **Shared memory across agents** — out of scope; memory is per-agent by design.
 - KB-level access control (read-only vs writable shared KBs).
-- Rate limiting / quota per org or agent.
-- Durable job queue (BullMQ + Redis) once ingestion volume grows.
+- Persistent storage, token, and monetary budgets (rate and concurrency limits exist).
+- Queue dashboards, load/failure drills, and separate worker deployment at larger scale.
+- Connection-pinned SSRF enforcement and infrastructure egress policy. Production
+  currently requires an explicit hostname allowlist and blocks private DNS answers.
+- Full OpenAPI schema/SDK compatibility suite, tracing, SLO dashboards, and alerting.
 - Re-ranking retrieved chunks (cross-encoder) for quality.
 - Conversation summarization to bound short-term history token cost.
+
+---
+
+## 12. A+ production execution plan
+
+The live checklist is [TODO.md](TODO.md). Work proceeds in this order:
+
+1. **Trust and governance:** revalidate outbound destinations at use time and persist
+   tenant request/token/storage/spend usage with hard limits.
+2. **Contract:** publish OpenAPI 3.1 and test the documented native/OpenAI surfaces.
+3. **Reliability:** expose queue dependency health, test retries/recovery/migrations, and
+   make the production release gate reproducible.
+4. **Operations:** define SLOs, alerts, backup/restore, rotation, load, restart, and
+   forced-shutdown drills.
+5. **External deployment proof:** enforce network egress outside the process and attach
+   dated drill evidence. This final item cannot be truthfully satisfied by source code
+   alone.

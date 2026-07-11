@@ -19,6 +19,15 @@ export async function classifyQuestion(opts: {
   embedding: number[]
   llm: LlmConfig
 }): Promise<string> {
+  // A durable job may be delivered more than once. The message is the idempotency
+  // key, so a completed classification is returned without incrementing again.
+  const [done] = await db
+    .select({ topicId: questionLogs.topicId })
+    .from(questionLogs)
+    .where(eq(questionLogs.messageId, opts.messageId))
+    .limit(1)
+  if (done?.topicId) return done.topicId
+
   const similarity = sql<number>`1 - (${cosineDistance(topics.centroid, opts.embedding)})`
   const [nearest] = await db
     .select({ id: topics.id, similarity })
@@ -35,13 +44,32 @@ export async function classifyQuestion(opts: {
   // Assignment + log write in one transaction; the counter uses an atomic
   // `count = count + 1` (not read-then-write), so concurrent questions can't lose counts.
   return db.transaction(async (tx) => {
+    // Serialize topic creation for one agent. This prevents two concurrent first
+    // questions from both observing an empty cluster set and creating duplicates.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${opts.agentId}))`)
+    const [alreadyDone] = await tx
+      .select({ topicId: questionLogs.topicId })
+      .from(questionLogs)
+      .where(eq(questionLogs.messageId, opts.messageId))
+      .limit(1)
+    if (alreadyDone?.topicId) return alreadyDone.topicId
+
+    // Re-read after acquiring the lock; the pre-lock nearest result may have
+    // become stale while another request created the first cluster.
+    const [lockedNearest] = await tx
+      .select({ id: topics.id, similarity })
+      .from(topics)
+      .where(eq(topics.agentId, opts.agentId))
+      .orderBy(desc(similarity))
+      .limit(1)
+
     let topicId: string
-    if (nearest && nearest.similarity >= MATCH_THRESHOLD) {
+    if (lockedNearest && lockedNearest.similarity >= MATCH_THRESHOLD) {
       await tx
         .update(topics)
         .set({ count: sql`${topics.count} + 1`, lastSeen: new Date() })
-        .where(eq(topics.id, nearest.id))
-      topicId = nearest.id
+        .where(eq(topics.id, lockedNearest.id))
+      topicId = lockedNearest.id
     } else {
       const [created] = await tx
         .insert(topics)

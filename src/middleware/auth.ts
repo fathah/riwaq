@@ -3,11 +3,16 @@ import { eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { organizations } from '../db/schema'
 import { hashApiKey } from '../lib/api-key'
+import { cacheGet, cacheSet } from '../lib/cache'
+import { checkRateLimit } from '../lib/rate-limit'
+import { env } from '../env'
 import type { AppEnv } from '../types'
 
-// Resolves the request's API key to an org and pins `orgId` on the context.
-// Every protected route runs through this, so handlers can trust c.get('orgId')
-// and scope all queries to it — that's what keeps tenants isolated.
+const inFlightByOrg = new Map<string, number>()
+
+// Resolves the request's API key to an org and pins `orgId` on the context, then
+// applies a per-org rate limit. Every protected route runs through this, so
+// handlers can trust c.get('orgId') and every tenant is rate-limited by default.
 export const orgAuth = createMiddleware<AppEnv>(async (c, next) => {
   const header = c.req.header('authorization')
   const key = header?.startsWith('Bearer ') ? header.slice(7).trim() : c.req.header('x-api-key')
@@ -16,15 +21,44 @@ export const orgAuth = createMiddleware<AppEnv>(async (c, next) => {
     return c.json({ error: 'missing API key (use Authorization: Bearer <key>)' }, 401)
   }
 
-  // Look up by hash — the raw key is never stored, so we can't (and needn't) compare it.
-  const [org] = await db
-    .select({ id: organizations.id })
-    .from(organizations)
-    .where(eq(organizations.apiKeyHash, hashApiKey(key)))
-    .limit(1)
+  // Resolve org by API-key hash. Cache the hash→orgId mapping in DragonflyDB so the
+  // hot auth path skips a DB round-trip (short TTL bounds staleness of any revocation).
+  const hash = hashApiKey(key)
+  const cacheKey = `auth:${hash}`
+  let orgId = await cacheGet<string>(cacheKey)
+  if (!orgId) {
+    const [org] = await db
+      .select({ id: organizations.id })
+      .from(organizations)
+      .where(eq(organizations.apiKeyHash, hash))
+      .limit(1)
+    if (!org) return c.json({ error: 'invalid API key' }, 401)
+    orgId = org.id
+    await cacheSet(cacheKey, orgId)
+  }
 
-  if (!org) return c.json({ error: 'invalid API key' }, 401)
+  // Per-org fixed-window rate limit.
+  const rl = await checkRateLimit(`org:${orgId}`, env.RATE_LIMIT_PER_ORG, env.RATE_LIMIT_WINDOW_SECONDS)
+  c.header('X-RateLimit-Limit', String(env.RATE_LIMIT_PER_ORG))
+  c.header('X-RateLimit-Remaining', String(rl.remaining))
+  if (!rl.allowed) {
+    c.header('Retry-After', String(rl.retryAfter))
+    return c.json({ error: 'rate limit exceeded' }, 429)
+  }
 
-  c.set('orgId', org.id)
-  await next()
+  const inFlight = inFlightByOrg.get(orgId) ?? 0
+  if (inFlight >= env.MAX_CONCURRENT_REQUESTS_PER_ORG) {
+    c.header('Retry-After', '1')
+    return c.json({ error: 'organization concurrency limit exceeded' }, 429)
+  }
+
+  c.set('orgId', orgId)
+  inFlightByOrg.set(orgId, inFlight + 1)
+  try {
+    await next()
+  } finally {
+    const remaining = (inFlightByOrg.get(orgId) ?? 1) - 1
+    if (remaining <= 0) inFlightByOrg.delete(orgId)
+    else inFlightByOrg.set(orgId, remaining)
+  }
 })

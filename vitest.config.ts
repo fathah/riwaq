@@ -15,7 +15,12 @@ export default defineConfig({
       NODE_ENV: 'test',
       EMBEDDING_DIM: '8',
       ANTHROPIC_API_KEY: 'test-key',
+      SECRET_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
+      END_USER_SIGNING_SECRET: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
       LLM_ALLOWED_HOSTS: '',
+      // The suite creates many orgs/requests from one "IP"; don't rate-limit tests.
+      RATE_LIMIT_PER_ORG: '1000000',
+      RATE_LIMIT_SIGNUP_PER_IP: '1000000',
     },
   },
 })

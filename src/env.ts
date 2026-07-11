@@ -41,13 +41,45 @@ const schema = z.object({
     .enum(['0', '1', 'true', 'false'])
     .default('0')
     .transform((v) => v === '1' || v === 'true'),
-  // Master key for encrypting tenant LLM credentials at rest (AES-256-GCM). Any
-  // string; empty → secrets stored as plaintext (dev only). Set in production.
+  // Base64-encoded 32-byte master key for tenant LLM credentials (AES-256-GCM).
+  // Optional in development; mandatory in production.
   SECRET_ENCRYPTION_KEY: z.string().default(''),
+  // HMAC key used by trusted organization backends to sign end-user identity.
+  // Base64-encoded 32+ bytes; mandatory in production.
+  END_USER_SIGNING_SECRET: z.string().default(''),
+  // Bound cached provider clients so rotated credentials leave memory promptly.
+  LLM_CLIENT_CACHE_MAX: z.coerce.number().int().positive().default(100),
+  LLM_CLIENT_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(300),
+
+  // --- DragonflyDB / Redis (optional; enables durable jobs, caching, rate limits) ---
+  // Redis-protocol URL (DragonflyDB is a drop-in). Empty → all Redis-backed features
+  // degrade gracefully: jobs run in-process, caching is skipped, rate limiting uses
+  // an in-process fallback. So the app still runs with zero extra services.
+  REDIS_URL: z.string().default(''),
+  // TTL (seconds) for cached org-auth + resolved LLM-config lookups.
+  CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(30),
+
+  // --- Abuse controls ---
+  // If set, POST /organizations requires this bootstrap token (admin-gated signup).
+  // Empty → open signup (dev), still rate-limited.
+  ADMIN_TOKEN: z.string().default(''),
+  // Fixed-window rate limits. Per authenticated org, and a tighter per-IP limit on
+  // the public org-creation endpoint.
+  RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+  RATE_LIMIT_PER_ORG: z.coerce.number().int().positive().default(120),
+  RATE_LIMIT_SIGNUP_PER_IP: z.coerce.number().int().positive().default(5),
+  MAX_CONCURRENT_REQUESTS_PER_ORG: z.coerce.number().int().positive().default(20),
+  ORG_MAX_TOTAL_TOKENS: z.coerce.number().int().nonnegative().default(10_000_000),
+  ORG_MAX_ESTIMATED_COST_MICROS: z.coerce.number().int().nonnegative().default(100_000_000),
+  ORG_MAX_DOCUMENTS: z.coerce.number().int().positive().default(10_000),
+  ORG_MAX_STORED_CHARS: z.coerce.number().int().positive().default(100_000_000),
+  COST_PER_MILLION_INPUT_TOKENS_MICROS: z.coerce.number().int().nonnegative().default(0),
+  COST_PER_MILLION_OUTPUT_TOKENS_MICROS: z.coerce.number().int().nonnegative().default(0),
   // Max accepted request body size in bytes (protects parsing + memory). Must stay
   // above the document upload cap (15 MB, see routes/documents.ts) or file uploads
   // would be rejected at the global boundary before reaching that route. Default 20 MB.
   MAX_BODY_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 
   // --- Retrieval tuning ---
   // Drop retrieved chunks below this cosine similarity (0..1). 0 = keep all.
@@ -57,6 +89,45 @@ const schema = z.object({
   RETRIEVAL_CHAR_BUDGET: z.coerce.number().int().positive().default(12_000),
 
   PORT: z.coerce.number().default(3000),
+}).superRefine((value, ctx) => {
+  if (value.SECRET_ENCRYPTION_KEY) {
+    const decoded = Buffer.from(value.SECRET_ENCRYPTION_KEY, 'base64')
+    const canonical = decoded.toString('base64').replace(/=+$/, '')
+    const supplied = value.SECRET_ENCRYPTION_KEY.replace(/=+$/, '')
+    if (decoded.length !== 32 || canonical !== supplied) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SECRET_ENCRYPTION_KEY'],
+        message: 'must be a canonical base64-encoded 32-byte key',
+      })
+    }
+  }
+  if (value.NODE_ENV === 'production' && !value.SECRET_ENCRYPTION_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['SECRET_ENCRYPTION_KEY'],
+      message: 'is required in production',
+    })
+  }
+  if (value.END_USER_SIGNING_SECRET && Buffer.from(value.END_USER_SIGNING_SECRET, 'base64').length < 32) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['END_USER_SIGNING_SECRET'],
+      message: 'must be base64-encoded and decode to at least 32 bytes',
+    })
+  }
+  if (value.NODE_ENV === 'production' && !value.END_USER_SIGNING_SECRET) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['END_USER_SIGNING_SECRET'], message: 'is required in production' })
+  }
+  if (value.NODE_ENV === 'production' && value.LLM_ALLOWED_HOSTS.length === 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['LLM_ALLOWED_HOSTS'], message: 'must not be empty in production' })
+  }
+  if (value.NODE_ENV === 'production' && !value.REDIS_URL) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['REDIS_URL'], message: 'is required in production' })
+  }
+  if (value.NODE_ENV === 'production' && !value.ADMIN_TOKEN) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ADMIN_TOKEN'], message: 'is required in production' })
+  }
 })
 
 export const env = schema.parse(process.env)

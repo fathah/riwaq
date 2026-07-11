@@ -1,3 +1,5 @@
+# Development stack: Postgres (pgvector) + DragonflyDB + API with live reload.
+# For production use docker-compose.prod.yml.
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -17,18 +19,32 @@ services:
       timeout: 3s
       retries: 20
 
+  # DragonflyDB — Redis-compatible, multi-threaded. Backs durable jobs, caching,
+  # and rate limiting. A drop-in for Redis with far better memory/CPU efficiency.
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    ulimits:
+      memlock: -1
+    ports:
+      - "6379:6379"
+    volumes:
+      - dragonflydata:/data
+
   api:
     build: .
     depends_on:
       db:
         condition: service_healthy
+      dragonfly:
+        condition: service_started
     environment:
       DATABASE_URL: postgres://riwaq:riwaq@db:5432/riwaq
+      REDIS_URL: redis://dragonfly:6379
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-anthropic}
-      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
       PORT: 3000
     ports:
       - "3000:3000"
@@ -39,3 +55,4 @@ services:
 
 volumes:
   pgdata:
+  dragonflydata:

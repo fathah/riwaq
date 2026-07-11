@@ -1,8 +1,8 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { env } from '../env'
 
-// Envelope encryption for secrets stored at rest (tenant LLM API keys). When a
-// master key is configured (SECRET_ENCRYPTION_KEY), values are sealed with
+// Authenticated encryption for secrets stored at rest (tenant LLM API keys). When
+// a master key is configured (SECRET_ENCRYPTION_KEY), values are sealed with
 // AES-256-GCM; otherwise they are stored as-is (development). Decryption detects
 // the format, so plaintext legacy values keep working after the key is introduced.
 //
@@ -12,10 +12,9 @@ import { env } from '../env'
 
 const PREFIX = 'enc:v1:'
 
-// Derive a 32-byte key from the configured secret (any length → 32 bytes).
 function masterKey(): Buffer | null {
   if (!env.SECRET_ENCRYPTION_KEY) return null
-  return createHash('sha256').update(env.SECRET_ENCRYPTION_KEY).digest()
+  return Buffer.from(env.SECRET_ENCRYPTION_KEY, 'base64')
 }
 
 export const encryptionEnabled = () => masterKey() !== null
@@ -31,9 +30,10 @@ export function encryptSecret(plaintext: string): string {
   return PREFIX + [iv, tag, ct].map((b) => b.toString('base64')).join(':')
 }
 
-/** Open a stored secret. Handles both sealed (`enc:v1:…`) and legacy plaintext. */
-export function decryptSecret(stored: string): string {
-  if (!stored.startsWith(PREFIX)) return stored // legacy/plaintext value
+/** Open a stored secret whose encrypted state comes from an explicit DB column. */
+export function decryptSecret(stored: string, encrypted = stored.startsWith(PREFIX)): string {
+  if (!encrypted) return stored
+  if (!stored.startsWith(PREFIX)) throw new Error('encrypted secret has an unsupported format')
   const key = masterKey()
   if (!key) throw new Error('encrypted secret found but SECRET_ENCRYPTION_KEY is not set')
   const [ivB64, tagB64, ctB64] = stored.slice(PREFIX.length).split(':')

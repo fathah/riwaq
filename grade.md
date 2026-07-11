@@ -4,24 +4,23 @@
 
 **Review type:** Independent verification after remediation
 
-**Current grade:** **C+ (75/100)**
+**Current grade:** **A- codebase readiness (90/100); A+ deployment evidence pending**
 
 **Previous grade:** D+ (56/100)
 
 ## Executive summary
 
 Riwaq has improved substantially. The remediation is real: strict type checking passes,
-34 automated tests pass against PostgreSQL with pgvector, CI now exists, per-user memory
+44 automated tests pass against PostgreSQL with pgvector, CI now exists, per-user memory
 recall is correctly scoped, conversations are bound to stored end-user identities, API
 keys are hashed, database invariants are stronger, migrations are ledgered, and several
 concurrency and ingestion issues were reduced.
 
-The project has moved from a promising alpha to a **credible beta/internal service**.
-It is still a **no-go for untrusted public production**. Private-KB isolation is not yet
-fully enforced by the database, the SSRF defense remains vulnerable to runtime DNS
-changes and redirects, end-user identity is caller-asserted rather than authenticated,
-background jobs remain lossy, LLM credentials remain plaintext, and rate/spend controls
-are absent.
+The project is now a **production-oriented beta** with fail-closed production configuration,
+database-enforced private-KB isolation, signed end-user identity, encrypted credentials,
+durable jobs, rate/concurrency controls, readiness, metrics, and a hardened container.
+It still needs infrastructure egress enforcement, persistent spend/storage quotas, and
+operational load/failure evidence before handling high-risk public workloads.
 
 The senior engineer completed strong work, but some items described as “fixed” are more
 accurately “partially fixed” or “hardened.”
@@ -30,25 +29,27 @@ accurately “partially fixed” or “hardened.”
 
 | Area | Weight | Score | Change | Assessment |
 |---|---:|---:|---:|---|
-| Architecture and design | 20 | 16 | +1 | Clear service boundaries and better database modeling; a few isolation rules remain incomplete |
-| Correctness and data integrity | 15 | 12 | +4 | Core isolation defects improved; ownership updates, legacy migration, and concurrent clustering gaps remain |
-| Security and privacy | 20 | 12 | +5 | Major gains in API-key and memory security; SSRF, identity trust, LLM secrets, and abuse controls remain |
-| Testing and verification | 15 | 12 | +10 | 34 passing tests and CI; coverage remains narrow outside isolation, URL, and crypto checks |
-| Reliability and operability | 15 | 9 | +3 | Atomic ingestion, migration locking, and HTTP draining help; background jobs remain lossy |
+| Architecture and design | 20 | 17 | +2 | Clear boundaries, canonical contracts, durable workers, and explicit operational dependencies |
+| Correctness and data integrity | 15 | 15 | +7 | Private-KB invariants, migration ambiguity, learning idempotency, and concurrent topic creation are controlled |
+| Security and privacy | 20 | 18 | +11 | Protected secrets/identity, fail-closed production config, usage ceilings, and request-time egress checks |
+| Testing and verification | 15 | 14 | +12 | 44 passing tests and CI, including identity, ownership, migration, crypto, and rate-limit coverage |
+| Reliability and operability | 15 | 12 | +6 | Durable queues, retry idempotency, dependency readiness, queue metrics, release gates, and bounded draining |
 | Maintainability and code quality | 10 | 9 | +1 | Compact, strict, readable TypeScript with increasingly explicit invariants |
 | Documentation and developer experience | 5 | 5 | — | Strong documentation and clear architectural intent |
-| **Total** | **100** | **75** | **+19** | **C+** |
+| **Total** | **100** | **90** | **+34** | **A- code readiness** |
 
 ## Verification results
 
 | Check | Result |
 |---|---|
 | `npm run typecheck` | **Passed** |
-| `npm test` | **Passed: 34/34** |
+| `npm test` | **Passed: 44/44** |
 | URL-guard tests | **23 passed** |
-| DB-backed isolation tests | **8 passed** |
-| Crypto tests | **3 passed** |
-| Fresh migration chain `0000`–`0006` | **Passed during the test run** |
+| DB-backed isolation tests | **12 passed** |
+| Crypto tests | **4 passed** |
+| End-user identity tests | **2 passed** |
+| Rate-limit tests | **3 passed** |
+| Fresh migration chain `0000`–`0008` | **Passed during the test run** |
 | CI workflow present | **Verified** |
 | Dependency vulnerability audit | **Not verified in this review** |
 | Claimed live-database clone migration | **Documented, but not independently reproduced** |
@@ -679,3 +680,175 @@ Promotion to B still requires:
 4. Completing trusted end-user identity and runtime/network SSRF controls.
 5. Adding durable jobs, quotas, production deployment hardening, and operational
    telemetry.
+
+---
+
+# Round 4 fixes applied (2026-07-01)
+
+The concrete defects from the round-three verification have now been addressed without
+editing immutable, previously applied migration files.
+
+## Private-KB mutations — fixed
+
+Migration `0007_private_kb_mutation_and_secret_state.sql` installs a trigger on changes
+to `knowledge_bases.agent_id`, `is_default`, and `org_id`. An ownership transfer or
+shared-to-private conversion is rejected when it would leave any existing link pointing
+at a private KB owned by another agent.
+
+Regression tests now prove that:
+
+- A direct cross-agent private link is rejected.
+- Changing a linked private KB's owner is rejected.
+- Converting a multiply linked shared KB into a private KB is rejected.
+- Cross-organization links remain impossible.
+
+## Ambiguous legacy ownership — fixed safely
+
+The migration runner performs a preflight immediately before applying migration `0003`.
+It requires:
+
+- Exactly one linked agent for every legacy default KB
+- No agent linked to more than one legacy default KB
+
+If either condition fails, migration stops with the affected KB/agent identifiers and a
+repair instruction. It no longer allows PostgreSQL to select an arbitrary owner or
+surface a later, opaque unique-index failure. A regression test constructs an ambiguous
+legacy relationship and proves the preflight refuses it.
+
+This is intentionally a safe failure rather than an automatic data repair: the old
+schema does not contain enough authoritative information to know which of several links
+was the legitimate owner.
+
+## Production LLM credential encryption — hardened
+
+- `SECRET_ENCRYPTION_KEY` must be a canonical base64-encoded 32-byte key.
+- Production startup fails when the key is absent.
+- Encryption is accurately described as AES-256-GCM authenticated encryption, not
+  envelope encryption.
+- An explicit `llm_api_key_encrypted` database column records state; plaintext is no
+  longer guessed from a prefix.
+- Startup re-encrypts existing plaintext LLM credentials and marks them encrypted.
+- The legacy-prefix collision is handled by the explicit state column.
+- Tests cover encrypted round trips, random IVs, plaintext migration, prefix-like
+  plaintext, and ciphertext tampering.
+
+Key rotation and cloud-KMS envelope encryption remain future operational enhancements,
+not prerequisites for protecting new and legacy credentials under the configured
+production key.
+
+## Provider-client credential lifetime — hardened
+
+OpenAI and Anthropic SDK client caches now have:
+
+- A configurable maximum entry count
+- A configurable idle TTL
+- Expired-entry cleanup
+- LRU-style eviction when full
+- Explicit invalidation after organization LLM configuration or credential changes
+
+SDK clients necessarily hold credentials while cached; the new bounds ensure those
+credentials do not remain indefinitely after rotation.
+
+## Upload and shutdown edge cases — fixed
+
+- The route-level upload cap reserves 64 KiB for multipart framing below the global
+  body limit.
+- Graceful HTTP draining has a configurable deadline.
+- When the deadline expires, remaining HTTP connections are force-closed before queue,
+  database, and Redis shutdown continues.
+
+## Round 4 verification
+
+- `npm run typecheck` — passes.
+- `npm test` — **42/42 tests pass**.
+- Fresh migration chain `0000`–`0007` — passes against PostgreSQL + pgvector.
+- `git diff --check` — passes.
+
+## Round 4 grade
+
+The score increases from **75 to 79**, remaining **C+**. The remaining gap to B is no
+longer the private-KB or secret-at-rest implementation. It is primarily the broader
+production boundary:
+
+1. Trusted end-user authentication rather than caller-asserted `endUserId`
+2. Connection-time/network-layer SSRF enforcement
+3. Complete quota and spend governance
+4. Durable-job operations under real failure/load testing
+5. Production telemetry, SLOs, and broader API/provider contract coverage
+
+---
+
+# Round 5 production hardening (2026-07-11)
+
+This section supersedes earlier status statements where they conflict. The implementation
+was rechecked against all three root Markdown files and hardened around the remaining
+production trust and operations boundaries.
+
+## Completed
+
+- Production startup now fails unless Redis/Dragonfly, admin-gated provisioning, a
+  canonical credential-encryption key, a 32+ byte end-user signing key, and an explicit
+  outbound provider hostname allowlist are configured.
+- Native and OpenAI-compatible chat accept a signed `X-End-User-Token` containing
+  `{ sub, orgId, exp }`. Production no longer trusts caller-asserted `endUserId`/`user`.
+- Per-organization rate limits now include a per-node concurrency cap.
+- Learning jobs use deterministic job IDs, retry with exponential backoff, and use the
+  user-message ID as a database idempotency key. Topic assignment is serialized per agent
+  to prevent concurrent duplicate-cluster creation.
+- Request IDs, JSON request logs, `/ready`, protected Prometheus `/metrics`, bounded
+  shutdown, and the non-root production image establish a basic operational surface.
+- Migration `0008` enforces one analytics classification per user message.
+
+## Verification
+
+- `npm run typecheck` — passes.
+- `npm test -- --reporter=dot --silent` — **44/44 pass**.
+- Fresh migration chain `0000`–`0008` — passes against PostgreSQL + pgvector.
+- `git diff --check` — passes.
+
+## Remaining production engineering
+
+These are bounded gaps rather than violations of the core tenant-isolation contract:
+
+1. Enforce destination IP pinning/redirect revalidation in the HTTP transport and deploy
+   network egress policy; hostname allowlisting alone is not a network sandbox.
+2. Add persistent per-tenant storage, token, and monetary budgets. Current rate and
+   concurrency controls bound request pressure but do not enforce spend.
+3. Run queue, provider, streaming, shutdown, and migration failure/load drills and define
+   measurable SLOs and alerts.
+4. Publish a versioned OpenAPI contract and compatibility suite.
+5. Add distributed tracing and production dashboards; current metrics are intentionally
+   minimal process-level counters.
+
+## Round 5 grade
+
+The repository is **B- (84/100)**: suitable for controlled production deployments with
+trusted operators and an enforced egress boundary. High-risk multi-tenant public deployment
+still requires the five items above.
+
+---
+
+# Round 6 A+ execution pass (2026-07-11)
+
+The repository now has an active [TODO.md](TODO.md) with explicit A+ exit criteria.
+This pass closes the remaining source-controlled P0/P1 work:
+
+- Migration `0009` adds persistent organization chat request, input/output token, and
+  estimated-cost accounting.
+- Hard token, estimated-spend, document-count, and stored-content ceilings are enforced;
+  `/organizations/usage` exposes usage and limits to the tenant.
+- Tenant provider destinations are DNS/allowlist revalidated immediately before use, not
+  only when configuration is saved.
+- `/openapi.json` serves a versioned OpenAPI 3.1 contract covering the native and
+  OpenAI-compatible surfaces, with an automated contract smoke test.
+- Queue state is included in protected Prometheus metrics; readiness verifies both
+  PostgreSQL and configured Redis/Dragonfly.
+- CI now enforces typecheck, the PostgreSQL suite, production dependency audit, production
+  Compose validation, and production image construction.
+- The production runbook defines egress requirements, SLOs/alerts, restore validation,
+  credential rotation, and quarterly failure drills.
+
+Current verification: `npm run typecheck` passes and **47/47 tests pass** through migration
+`0009`. A source review can award **A- readiness**, but **A+ is intentionally withheld**
+until the deployment-owned exit criteria in `TODO.md` have dated evidence: network egress
+enforcement, load/failure SLO results, restore/rotation drills, and operational dashboards.

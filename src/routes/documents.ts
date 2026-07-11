@@ -6,9 +6,10 @@ import { documents, knowledgeBases } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg, getKbInOrg } from '../db/guards'
 import { parseToText } from '../lib/parse'
-import { ingestText } from '../services/ingest'
+import { enqueueIngest } from '../lib/queue'
 import { env } from '../env'
 import type { AppEnv } from '../types'
+import { assertStorageQuota, QuotaExceededError } from '../services/usage'
 
 export const documentsRoute = new Hono<AppEnv>()
 documentsRoute.use('*', orgAuth)
@@ -17,7 +18,11 @@ documentsRoute.use('*', orgAuth)
 // single tenant can't exhaust memory or run away on embedding cost. The upload cap
 // is clamped below the global body limit so a large file is never silently rejected
 // at the server boundary before this route's friendlier 413 can fire.
-const MAX_UPLOAD_BYTES = Math.min(15 * 1024 * 1024, env.MAX_BODY_BYTES)
+const MULTIPART_OVERHEAD_BYTES = 64 * 1024
+const MAX_UPLOAD_BYTES = Math.min(
+  15 * 1024 * 1024,
+  Math.max(0, env.MAX_BODY_BYTES - MULTIPART_OVERHEAD_BYTES),
+)
 const MAX_TEXT_CHARS = 5_000_000 // ~5 MB of extracted text
 const MAX_NAME_LEN = 300
 
@@ -29,14 +34,16 @@ function capText(text: string): string {
 }
 
 // Create a document row, kick off async ingestion, return immediately.
-async function createAndIngest(kbId: string, name: string, source: 'file' | 'text', text: string) {
+async function createAndIngest(orgId: string, kbId: string, name: string, source: 'file' | 'text', text: string) {
+  await assertStorageQuota(orgId, text.length)
   const [doc] = await db
     .insert(documents)
     .values({ knowledgeBaseId: kbId, name, source, status: 'processing' })
     .returning({ id: documents.id, status: documents.status, name: documents.name })
 
-  // Fire-and-forget: parse/chunk/embed/store happens after we respond.
-  void ingestText(doc!.id, kbId, text)
+  // Durable enqueue (survives restart) when a queue is configured; otherwise runs
+  // in-process. Awaited so the job is safely queued before we return 202.
+  await enqueueIngest({ documentId: doc!.id, knowledgeBaseId: kbId, text })
   return doc!
 }
 
@@ -83,7 +90,13 @@ documentsRoute.post('/knowledge-bases/:kbId/documents', async (c) => {
   }
   if (!upload) return c.json({ error: 'provide a `file` (multipart) or `text` (json/form)' }, 400)
 
-  const doc = await createAndIngest(kb.id, upload.name, upload.source, upload.text)
+  let doc
+  try {
+    doc = await createAndIngest(orgId, kb.id, upload.name, upload.source, upload.text)
+  } catch (err) {
+    if (err instanceof QuotaExceededError) return c.json({ error: err.message }, 429)
+    throw err
+  }
   return c.json({ documentId: doc.id, name: doc.name, status: doc.status }, 202)
 })
 
@@ -111,7 +124,13 @@ documentsRoute.post('/agents/:id/documents', async (c) => {
   }
   if (!upload) return c.json({ error: 'provide a `file` (multipart) or `text` (json/form)' }, 400)
 
-  const doc = await createAndIngest(defaultKb.id, upload.name, upload.source, upload.text)
+  let doc
+  try {
+    doc = await createAndIngest(orgId, defaultKb.id, upload.name, upload.source, upload.text)
+  } catch (err) {
+    if (err instanceof QuotaExceededError) return c.json({ error: err.message }, 429)
+    throw err
+  }
   return c.json({ documentId: doc.id, name: doc.name, status: doc.status, knowledgeBaseId: defaultKb.id }, 202)
 })
 

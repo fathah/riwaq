@@ -6,18 +6,41 @@ import { organizations } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { generateApiKey, hashApiKey, apiKeyPrefix } from '../lib/api-key'
 import { assertPublicUrl, UnsafeUrlError } from '../lib/url-guard'
-import { encryptSecret } from '../lib/crypto'
+import { encryptSecret, encryptionEnabled } from '../lib/crypto'
+import { checkRateLimit } from '../lib/rate-limit'
+import { invalidateLlmConfig } from '../services/llm-config'
 import { env } from '../env'
+import { clearLlmClientCache } from '../lib/llm'
 import type { AppEnv } from '../types'
+import { getUsageSnapshot } from '../services/usage'
 
 export const organizationsRoute = new Hono<AppEnv>()
 
 const createSchema = z.object({ name: z.string().min(1).max(200) })
 
-// PUBLIC: bootstrap an org. Returns the API key ONCE — store it; it's the only
-// way to authenticate every subsequent request for this tenant. The DB keeps only
-// the key's hash, so this is the sole moment the raw key exists.
+function clientIp(c: { req: { header: (n: string) => string | undefined } }): string {
+  const xff = c.req.header('x-forwarded-for')
+  return (xff ? xff.split(',')[0]!.trim() : '') || 'unknown'
+}
+
+// Bootstrap an org. Gated by ADMIN_TOKEN when set (admin-provisioned signup);
+// otherwise open but per-IP rate-limited. Returns the API key ONCE — the DB keeps
+// only its hash, so this is the sole moment the raw key exists.
 organizationsRoute.post('/organizations', async (c) => {
+  // Admin gate: in production set ADMIN_TOKEN so signup isn't a public free-for-all.
+  if (env.ADMIN_TOKEN) {
+    const header = c.req.header('authorization')
+    const provided = header?.startsWith('Bearer ') ? header.slice(7).trim() : c.req.header('x-admin-token')
+    if (provided !== env.ADMIN_TOKEN) return c.json({ error: 'admin token required to create organizations' }, 401)
+  } else {
+    // Open signup → cap abuse per IP.
+    const rl = await checkRateLimit(`signup:${clientIp(c)}`, env.RATE_LIMIT_SIGNUP_PER_IP, env.RATE_LIMIT_WINDOW_SECONDS)
+    if (!rl.allowed) {
+      c.header('Retry-After', String(rl.retryAfter))
+      return c.json({ error: 'too many signups from this address' }, 429)
+    }
+  }
+
   const body = await c.req.json().catch(() => ({}))
   const parsed = createSchema.safeParse(body)
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
@@ -61,6 +84,10 @@ organizationsRoute.get('/organizations/me', orgAuth, async (c) => {
   })
 })
 
+organizationsRoute.get('/organizations/usage', orgAuth, async (c) => {
+  return c.json(await getUsageSnapshot(c.get('orgId')))
+})
+
 // AUTHED: configure this org's LLM. Each field is optional; send a field to set it,
 // send null to clear it (falling back to the .env default). Unspecified fields keep
 // their current value.
@@ -90,12 +117,14 @@ organizationsRoute.put('/organizations/llm', orgAuth, async (c) => {
     }
   }
 
-  const patch: Record<string, string | null> = {}
+  const patch: Record<string, string | boolean | null> = {}
   if ('provider' in parsed.data) patch.llmProvider = parsed.data.provider ?? null
   if ('baseUrl' in parsed.data) patch.llmBaseUrl = parsed.data.baseUrl ?? null
   // Encrypt the tenant LLM key at rest (no-op passthrough when no master key is set).
-  if ('apiKey' in parsed.data)
+  if ('apiKey' in parsed.data) {
     patch.llmApiKey = parsed.data.apiKey ? encryptSecret(parsed.data.apiKey) : null
+    patch.llmApiKeyEncrypted = parsed.data.apiKey ? encryptionEnabled() : false
+  }
   if ('model' in parsed.data) patch.llmModel = parsed.data.model ?? null
 
   if (Object.keys(patch).length === 0) return c.json({ error: 'no fields to update' }, 400)
@@ -110,6 +139,11 @@ organizationsRoute.put('/organizations/llm', orgAuth, async (c) => {
       llmModel: organizations.llmModel,
       llmApiKey: organizations.llmApiKey,
     })
+
+  // Drop cached config + provider clients so rotated credentials leave memory and
+  // the next chat turn sees the change immediately.
+  clearLlmClientCache()
+  await invalidateLlmConfig(orgId)
 
   return c.json({
     llm: {

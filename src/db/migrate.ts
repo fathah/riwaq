@@ -13,6 +13,41 @@ const migrationsDir = join(here, 'migrations')
 const MIGRATION_LOCK_KEY = 40_719_2026 // arbitrary but fixed
 
 /**
+ * Migration 0003 predates explicit private-KB ownership. Its backfill is safe only
+ * when every legacy private KB has exactly one link and no agent is linked to more
+ * than one private KB. Refuse ambiguous data instead of letting UPDATE ... FROM
+ * choose an arbitrary owner or fail later with a less useful unique violation.
+ */
+export async function assertLegacyPrivateKbOwnershipIsUnambiguous() {
+  const ambiguousKbs = await sql<{ id: string; link_count: number }[]>`
+    SELECT kb.id, count(akb.agent_id)::int AS link_count
+    FROM knowledge_bases kb
+    LEFT JOIN agent_knowledge_bases akb ON akb.knowledge_base_id = kb.id
+    WHERE kb.is_default = true
+    GROUP BY kb.id
+    HAVING count(akb.agent_id) <> 1
+    LIMIT 10
+  `
+  const ambiguousAgents = await sql<{ agent_id: string; kb_count: number }[]>`
+    SELECT akb.agent_id, count(DISTINCT kb.id)::int AS kb_count
+    FROM agent_knowledge_bases akb
+    JOIN knowledge_bases kb ON kb.id = akb.knowledge_base_id
+    WHERE kb.is_default = true
+    GROUP BY akb.agent_id
+    HAVING count(DISTINCT kb.id) > 1
+    LIMIT 10
+  `
+
+  if (ambiguousKbs.length === 0 && ambiguousAgents.length === 0) return
+
+  throw new Error(
+    '[migrate] cannot infer private knowledge-base ownership safely before 0003_kb_ownership.sql. ' +
+      `Ambiguous KBs=${JSON.stringify(ambiguousKbs)}; agents linked to multiple private KBs=${JSON.stringify(ambiguousAgents)}. ` +
+      'Repair these legacy links explicitly, then rerun migrations.',
+  )
+}
+
+/**
  * Ledgered, locked migration runner. Each `*.sql` file is applied exactly once,
  * inside a transaction, and recorded in `schema_migrations` with a checksum. A
  * file whose contents changed after being applied is a hard error — history is
@@ -51,6 +86,10 @@ export async function migrate() {
           )
         }
         continue
+      }
+
+      if (file === '0003_kb_ownership.sql') {
+        await assertLegacyPrivateKbOwnershipIsUnambiguous()
       }
 
       // Apply the whole file atomically, then record it in the same transaction.

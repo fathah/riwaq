@@ -9,6 +9,8 @@ import type { ChatMessage } from '../lib/llm'
 import { runChatTurn, streamChatTurn, ChatError, type Agent, type ChatTurnInput } from '../services/chat'
 import { serializeResult, createStreamSerializer } from '../serializers'
 import type { AppEnv } from '../types'
+import { isProd } from '../env'
+import { verifyEndUserToken } from '../lib/end-user-token'
 
 // OpenAI-compatible surface. Point any OpenAI SDK at `<base>/v1`, use the org
 // API key as the OpenAI key, and pass the agent id (or name) as `model`.
@@ -81,6 +83,19 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
     const e = oaiError(`model '${body.model}' not found (use an agent id or name)`, 404, 'model_not_found')
     return c.json(e.body, e._status)
   }
+  let endUserId = body.user
+  const identityToken = c.req.header('x-end-user-token')
+  if (identityToken) {
+    try {
+      endUserId = verifyEndUserToken(identityToken, orgId).sub
+    } catch (err) {
+      const e = oaiError(err instanceof Error ? err.message : 'invalid end-user token', 401, 'invalid_end_user_token')
+      return c.json(e.body, e._status)
+    }
+  } else if (isProd) {
+    const e = oaiError('X-End-User-Token is required in production', 401, 'missing_end_user_token')
+    return c.json(e.body, e._status)
+  }
 
   // Split the OpenAI messages: client system messages are ignored (the agent's
   // own system prompt + grounding rules are authoritative); the last user
@@ -108,7 +123,7 @@ openaiRoute.post('/v1/chat/completions', async (c) => {
   // provider backs the agent.
   const input: ChatTurnInput = {
     agent,
-    endUserId: body.user || 'openai',
+    endUserId: endUserId || 'openai',
     message,
     historyOverride,
     ...(body.max_tokens ? { maxTokens: body.max_tokens } : {}),

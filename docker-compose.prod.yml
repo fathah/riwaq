@@ -1,0 +1,70 @@
+# Production stack. Run with:
+#   docker compose -f docker-compose.prod.yml up --build
+# Required env (via a .env file or the shell): POSTGRES_PASSWORD, SECRET_ENCRYPTION_KEY,
+# END_USER_SIGNING_SECRET, ADMIN_TOKEN, LLM_ALLOWED_HOSTS, and at least one LLM key. The database and cache are NOT published to
+# the host — only the API is reachable.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-riwaq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-riwaq}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No host port — reachable only on the internal compose network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-riwaq} -d ${POSTGRES_DB:-riwaq}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    ulimits:
+      memlock: -1
+    volumes:
+      - dragonflydata:/data
+    restart: unless-stopped
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      dragonfly:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-riwaq}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-riwaq}
+      REDIS_URL: redis://dragonfly:6379
+      # Encrypt tenant LLM keys at rest + gate signup + lock SSRF egress in prod.
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?set SECRET_ENCRYPTION_KEY}
+      END_USER_SIGNING_SECRET: ${END_USER_SIGNING_SECRET:?set END_USER_SIGNING_SECRET}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      LLM_ALLOWED_HOSTS: ${LLM_ALLOWED_HOSTS:?set LLM_ALLOWED_HOSTS}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-anthropic}
+      ORG_MAX_TOTAL_TOKENS: ${ORG_MAX_TOTAL_TOKENS:-10000000}
+      ORG_MAX_ESTIMATED_COST_MICROS: ${ORG_MAX_ESTIMATED_COST_MICROS:-100000000}
+      ORG_MAX_DOCUMENTS: ${ORG_MAX_DOCUMENTS:-10000}
+      ORG_MAX_STORED_CHARS: ${ORG_MAX_STORED_CHARS:-100000000}
+      COST_PER_MILLION_INPUT_TOKENS_MICROS: ${COST_PER_MILLION_INPUT_TOKENS_MICROS:-0}
+      COST_PER_MILLION_OUTPUT_TOKENS_MICROS: ${COST_PER_MILLION_OUTPUT_TOKENS_MICROS:-0}
+      EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      PORT: 3000
+    ports:
+      - "${API_PORT:-3000}:3000"
+    # Runs the image's default CMD (non-root, prod deps) — no source mount, no watch.
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  dragonflydata:

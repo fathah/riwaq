@@ -7,7 +7,8 @@ import { searchChunks } from './retrieve'
 import { recallMemories } from './memory'
 import { resolveLlmConfig } from './llm-config'
 import { buildSystemPrompt } from '../prompts/system'
-import { learnAfterTurn } from './learn'
+import { enqueueLearn } from '../lib/queue'
+import { assertChatQuota, recordChatUsage, QuotaExceededError } from './usage'
 
 const TOP_K = 6
 const HISTORY_TURNS = 10
@@ -80,6 +81,12 @@ export type ChatStreamEvent =
  */
 export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTurn> {
   const { agent, endUserId, message } = input
+  try {
+    await assertChatQuota(agent.orgId)
+  } catch (err) {
+    if (err instanceof QuotaExceededError) throw new ChatError(err.message, 429)
+    throw err
+  }
 
   // 1. Resolve or create the conversation. It must belong to this agent AND to
   // the same end user. A caller-supplied conversationId is NOT proof of identity,
@@ -149,15 +156,21 @@ export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTur
       usedChunkIds,
       tokens: inputTokens + outputTokens,
     })
-    learnAfterTurn({
+    await recordChatUsage(agent.orgId, inputTokens, outputTokens)
+    // Non-blocking: enqueue durable learning (or run in-process if no queue). The
+    // payload carries orgId + provider/model, not the resolved key, so no secret
+    // is written to the job store.
+    void enqueueLearn({
       agentId: agent.id,
+      orgId: agent.orgId,
       endUserId,
       userMessageId: userMsg!.id,
       userMessage: message,
       assistantMessage: answer,
       questionEmbedding: queryEmbedding,
-      llm,
-    })
+      provider: agent.provider,
+      model: agent.model,
+    }).catch((err) => console.error('[learn] enqueue failed', err))
   }
 
   return { conversationId, system, llmMessages, citations, llm, finalize }
