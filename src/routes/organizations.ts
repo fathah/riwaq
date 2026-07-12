@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { organizations } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
+import { randomBytes } from 'node:crypto'
 import { generateApiKey, hashApiKey, apiKeyPrefix } from '../lib/api-key'
 import { assertPublicUrl, UnsafeUrlError } from '../lib/url-guard'
 import { encryptSecret, encryptionEnabled } from '../lib/crypto'
@@ -86,6 +87,67 @@ organizationsRoute.get('/organizations/me', orgAuth, async (c) => {
 
 organizationsRoute.get('/organizations/usage', orgAuth, async (c) => {
   return c.json(await getUsageSnapshot(c.get('orgId')))
+})
+
+// AUTHED: self-learning policy. `autoPromoteThreshold` = number of DISTINCT end
+// users who must endorse a learned answer before it is auto-promoted into the
+// agent's knowledge base. 0 = operator approval only.
+const learningSchema = z.object({ autoPromoteThreshold: z.number().int().min(0) })
+
+organizationsRoute.put('/organizations/learning', orgAuth, async (c) => {
+  const orgId = c.get('orgId')
+  const parsed = learningSchema.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
+
+  const [org] = await db
+    .update(organizations)
+    .set({ learnedAutoPromoteThreshold: parsed.data.autoPromoteThreshold })
+    .where(eq(organizations.id, orgId))
+    .returning({ threshold: organizations.learnedAutoPromoteThreshold })
+  return c.json({ autoPromoteThreshold: org!.threshold })
+})
+
+// AUTHED: configure the webhook the reminder scheduler posts fired reminders to.
+// `url` is SSRF-validated; a signing secret is generated (or you may supply one)
+// and returned ONCE — store it to verify the X-Riwaq-Signature header. Send
+// url:null to disable.
+const webhookSchema = z.object({
+  url: z.string().url().nullable(),
+  secret: z.string().min(16).max(200).optional(),
+})
+
+organizationsRoute.put('/organizations/webhook', orgAuth, async (c) => {
+  const orgId = c.get('orgId')
+  const parsed = webhookSchema.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
+
+  if (parsed.data.url === null) {
+    await db.update(organizations).set({ webhookUrl: null }).where(eq(organizations.id, orgId))
+    return c.json({ webhook: { url: null } })
+  }
+
+  try {
+    await assertPublicUrl(parsed.data.url, {
+      allowInsecure: env.ALLOW_INSECURE_LLM_URLS,
+    })
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) return c.json({ error: `webhook url rejected: ${err.message}` }, 400)
+    throw err
+  }
+
+  // Generate a signing secret if the caller didn't supply one. Stored encrypted.
+  const secret = parsed.data.secret ?? randomBytes(24).toString('base64url')
+  await db
+    .update(organizations)
+    .set({
+      webhookUrl: parsed.data.url,
+      webhookSecret: encryptSecret(secret),
+      webhookSecretEncrypted: encryptionEnabled(),
+    })
+    .where(eq(organizations.id, orgId))
+
+  // Returned once so the org can verify signatures; never echoed again.
+  return c.json({ webhook: { url: parsed.data.url, secret } })
 })
 
 // AUTHED: configure this org's LLM. Each field is optional; send a field to set it,

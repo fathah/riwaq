@@ -72,8 +72,8 @@ export async function resolveLlmConfig(orgId: string, agent?: AgentOverride): Pr
     DEFAULT_MODEL[provider]
 
   // baseURL: org override (if it applies), else the env default for OpenAI.
-  const baseURL =
-    (orgApplies ? org?.baseUrl : null) || (provider === 'openai' ? env.OPENAI_BASE_URL : undefined)
+  const tenantBaseUrl = orgApplies ? org?.baseUrl || null : null
+  const baseURL = tenantBaseUrl || (provider === 'openai' ? env.OPENAI_BASE_URL : undefined)
 
   // The org's stored LLM key is encrypted at rest — decrypt it here, in-process,
   // only when it actually applies to this call.
@@ -84,12 +84,20 @@ export async function resolveLlmConfig(orgId: string, agent?: AgentOverride): Pr
   // Re-resolve and revalidate tenant-controlled destinations immediately before
   // every provider call. This closes the stored-DNS drift window; production's
   // mandatory hostname allowlist remains the primary application-layer policy.
-  if (orgApplies && org?.baseUrl && baseURL) {
-    await assertPublicUrl(baseURL, {
+  // The guarded fetch (wired below via guardEgress) re-checks again at connect
+  // time and refuses redirects.
+  if (tenantBaseUrl) {
+    await assertPublicUrl(baseURL!, {
       allowInsecure: env.ALLOW_INSECURE_LLM_URLS,
       allowedHosts: env.LLM_ALLOWED_HOSTS,
     })
   }
 
-  return { provider, model, apiKey, ...(baseURL ? { baseURL } : {}) }
+  return {
+    provider,
+    model,
+    apiKey,
+    ...(baseURL ? { baseURL } : {}),
+    ...(tenantBaseUrl ? { guardEgress: true } : {}),
+  }
 }

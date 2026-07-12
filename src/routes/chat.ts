@@ -3,7 +3,7 @@ import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg } from '../db/guards'
-import { runChatTurn, streamChatTurn, ChatError } from '../services/chat'
+import { prepareChatTurn, runPrepared, streamPrepared, ChatError } from '../services/chat'
 import { serializeResult, createStreamSerializer, parseFormat } from '../serializers'
 import type { AppEnv } from '../types'
 import { isProd } from '../env'
@@ -49,11 +49,22 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     ...(parsed.data.conversationId ? { conversationId: parsed.data.conversationId } : {}),
   }
 
+  // Prepare BEFORE opening any stream so pre-flight failures (quota 429, unknown
+  // conversation 404, identity mismatch 403) return a real HTTP status instead of
+  // an error event on a 200 SSE response.
+  let prepared
+  try {
+    prepared = await prepareChatTurn(input)
+  } catch (err) {
+    if (err instanceof ChatError) return c.json({ error: err.message }, err.status as 400 | 403 | 404 | 429)
+    throw err
+  }
+
   if (c.req.query('stream') === '1') {
     const ser = createStreamSerializer(format, { model: agent.id, includeUsage: true })
     return streamSSE(c, async (sse) => {
       try {
-        for await (const ev of streamChatTurn(input)) {
+        for await (const ev of streamPrepared(prepared)) {
           for (const frame of ser.frames(ev)) await sse.writeSSE(frame)
         }
       } catch (err) {
@@ -63,11 +74,6 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     })
   }
 
-  try {
-    const result = await runChatTurn(input)
-    return c.json(serializeResult(result, format, agent.id) as object)
-  } catch (err) {
-    if (err instanceof ChatError) return c.json({ error: err.message }, err.status as 400 | 403 | 404)
-    throw err
-  }
+  const result = await runPrepared(prepared)
+  return c.json(serializeResult(result, format, agent.id) as object)
 })

@@ -93,7 +93,10 @@ export async function migrate() {
       }
 
       // Apply the whole file atomically, then record it in the same transaction.
+      // DDL (e.g. a large index build) can legitimately run long, so the app-wide
+      // statement_timeout is lifted for the migration transaction only.
       await sql.begin(async (tx) => {
+        await tx.unsafe('SET LOCAL statement_timeout = 0')
         await tx.unsafe(ddl)
         await tx`INSERT INTO schema_migrations (filename, checksum) VALUES (${file}, ${checksum})`
       })

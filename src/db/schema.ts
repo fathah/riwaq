@@ -4,6 +4,8 @@ import {
   text,
   boolean,
   integer,
+  bigint,
+  real,
   jsonb,
   timestamp,
   vector,
@@ -29,6 +31,13 @@ export const organizations = pgTable('organizations', {
   llmApiKey: text('llm_api_key'), // key for the org's chosen provider/endpoint
   llmApiKeyEncrypted: boolean('llm_api_key_encrypted').notNull().default(false),
   llmModel: text('llm_model'),
+  // Self-learning: auto-promote a learned answer once this many DISTINCT end users
+  // endorse it. 0 = operator approval only.
+  learnedAutoPromoteThreshold: integer('learned_auto_promote_threshold').notNull().default(0),
+  // Webhook the reminder scheduler posts fired reminders to (signed with the secret).
+  webhookUrl: text('webhook_url'),
+  webhookSecret: text('webhook_secret'),
+  webhookSecretEncrypted: boolean('webhook_secret_encrypted').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
@@ -157,16 +166,92 @@ export const questionLogs = pgTable('question_logs', {
     .references(() => messages.id, { onDelete: 'cascade' }),
   topicId: uuid('topic_id').references(() => topics.id, { onDelete: 'set null' }),
   embedding: vector('embedding', { dimensions: EMBEDDING_DIM }).notNull(),
+  // Best retrieval similarity at answer time — low ⇒ a likely knowledge gap.
+  topSimilarity: real('top_similarity').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+// Self-learning: a Q&A the agent's own users endorsed. Clustered by question
+// embedding so equivalent questions accrue endorsements to ONE candidate. On
+// promotion the Q&A is written into the agent's KB (promotedDocumentId).
+export const learnedAnswers = pgTable('learned_answers', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  orgId: uuid('org_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  agentId: uuid('agent_id')
+    .notNull()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  question: text('question').notNull(),
+  answer: text('answer').notNull(),
+  embedding: vector('embedding', { dimensions: EMBEDDING_DIM }).notNull(),
+  status: text('status').notNull().default('pending'), // pending | approved | rejected
+  distinctUserCount: integer('distinct_user_count').notNull().default(0),
+  promotedDocumentId: uuid('promoted_document_id').references(() => documents.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+// One endorsement per (candidate, end user). The composite PK is what makes
+// distinctUserCount trustworthy: a single user cannot vote twice.
+export const learnedAnswerVotes = pgTable(
+  'learned_answer_votes',
+  {
+    learnedAnswerId: uuid('learned_answer_id')
+      .notNull()
+      .references(() => learnedAnswers.id, { onDelete: 'cascade' }),
+    endUserId: text('end_user_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.learnedAnswerId, t.endUserId] })],
+)
+
+// Scheduled reminders. The scheduler polls next_fire_at and fires a signed webhook;
+// recurring reminders advance, one-offs complete.
+export const reminders = pgTable('reminders', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  orgId: uuid('org_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  agentId: uuid('agent_id')
+    .notNull()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  endUserId: text('end_user_id'),
+  title: text('title').notNull(),
+  message: text('message'), // static body, OR
+  prompt: text('prompt'), // agent composes at fire time
+  dueAt: timestamp('due_at', { withTimezone: true }).notNull(),
+  recurrence: text('recurrence'), // null | daily | weekly | monthly | yearly
+  status: text('status').notNull().default('scheduled'),
+  source: text('source').notNull().default('api'), // api | auto
+  nextFireAt: timestamp('next_fire_at', { withTimezone: true }).notNull(),
+  attemptCount: integer('attempt_count').notNull().default(0),
+  fireCount: integer('fire_count').notNull().default(0),
+  lastFiredAt: timestamp('last_fired_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const reminderDeliveries = pgTable('reminder_deliveries', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  reminderId: uuid('reminder_id')
+    .notNull()
+    .references(() => reminders.id, { onDelete: 'cascade' }),
+  status: text('status').notNull(), // ok | failed | skipped
+  responseCode: integer('response_code'),
+  error: text('error'),
+  message: text('message'),
+  firedAt: timestamp('fired_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
 export const organizationUsage = pgTable('organization_usage', {
   orgId: uuid('org_id')
     .primaryKey()
     .references(() => organizations.id, { onDelete: 'cascade' }),
-  chatRequests: integer('chat_requests').notNull().default(0),
-  inputTokens: integer('input_tokens').notNull().default(0),
-  outputTokens: integer('output_tokens').notNull().default(0),
-  estimatedCostMicros: integer('estimated_cost_micros').notNull().default(0),
+  // bigint (mode: number) so lifetime counters can't overflow int4 mid-turn.
+  chatRequests: bigint('chat_requests', { mode: 'number' }).notNull().default(0),
+  inputTokens: bigint('input_tokens', { mode: 'number' }).notNull().default(0),
+  outputTokens: bigint('output_tokens', { mode: 'number' }).notNull().default(0),
+  estimatedCostMicros: bigint('estimated_cost_micros', { mode: 'number' }).notNull().default(0),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 })

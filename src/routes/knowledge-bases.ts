@@ -1,10 +1,11 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, eq } from 'drizzle-orm'
+import { and, desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { knowledgeBases, agentKnowledgeBases } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg, getKbInOrg } from '../db/guards'
+import { pageParams } from '../lib/pagination'
 import type { AppEnv } from '../types'
 
 // Org is implicit from the API key, so KB endpoints don't repeat /organizations/:id.
@@ -27,10 +28,17 @@ knowledgeBasesRoute.post('/knowledge-bases', async (c) => {
   return c.json(kb!, 201)
 })
 
-// List all KBs in the org (private + shared).
+// List all KBs in the org (private + shared), paginated newest first.
 knowledgeBasesRoute.get('/knowledge-bases', async (c) => {
   const orgId = c.get('orgId')
-  const rows = await db.select().from(knowledgeBases).where(eq(knowledgeBases.orgId, orgId))
+  const { limit, offset } = pageParams((n) => c.req.query(n))
+  const rows = await db
+    .select()
+    .from(knowledgeBases)
+    .where(eq(knowledgeBases.orgId, orgId))
+    .orderBy(desc(knowledgeBases.createdAt))
+    .limit(limit)
+    .offset(offset)
   return c.json(rows)
 })
 

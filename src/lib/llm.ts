@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { createHash } from 'node:crypto'
 import { env } from '../env'
+import { guardedFetch } from './guarded-fetch'
 
 // Cache key that doesn't retain the raw credential as a plaintext map key.
 const cacheKey = (cfg: { baseURL?: string; apiKey: string }) =>
@@ -88,6 +89,9 @@ export type LlmConfig = {
   model: string
   apiKey: string
   baseURL?: string // OpenAI-compatible endpoint; optional for anthropic
+  // True when baseURL is TENANT-supplied (org override) rather than operator env.
+  // Only then do we route egress through the SSRF-guarded fetch.
+  guardEgress?: boolean
 }
 
 // Sensible cheap default model per provider when nothing else specifies one.
@@ -112,7 +116,14 @@ function anthropicClient(cfg: LlmConfig): Anthropic {
   const k = cacheKey(cfg)
   let c = getCachedClient(anthropicCache, k)
   if (!c) {
-    c = new Anthropic({ apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) })
+    // Route tenant-supplied endpoints through the SSRF-guarded fetch (re-validates
+    // the destination + refuses redirects). The official API (no baseURL) uses the
+    // SDK's own fetch.
+    c = new Anthropic({
+      apiKey: cfg.apiKey,
+      ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}),
+      ...(cfg.baseURL && cfg.guardEgress ? { fetch: guardedFetch } : {}),
+    })
     cacheClient(anthropicCache, k, c)
   }
   return c
@@ -123,7 +134,12 @@ function openaiClient(cfg: LlmConfig): OpenAI {
   const k = cacheKey(cfg)
   let c = getCachedClient(openaiCache, k)
   if (!c) {
-    c = new OpenAI({ apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) })
+    // Tenant-supplied endpoints go through the SSRF-guarded fetch (see above).
+    c = new OpenAI({
+      apiKey: cfg.apiKey,
+      ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}),
+      ...(cfg.baseURL && cfg.guardEgress ? { fetch: guardedFetch } : {}),
+    })
     cacheClient(openaiCache, k, c)
   }
   return c
@@ -137,15 +153,25 @@ type CallOpts = {
   temperature?: number
 }
 
+// Providers disagree on the valid temperature range (OpenAI 0..2, Anthropic 0..1).
+// Clamp to the backend's range so a spec-legal request for one provider doesn't
+// 400 on the other — which would also leak which backend is in use.
+function clampTemperature(provider: Provider, t: number | undefined): number | undefined {
+  if (t === undefined) return undefined
+  const max = provider === 'anthropic' ? 1 : 2
+  return Math.min(Math.max(t, 0), max)
+}
+
 /** One-shot completion. Same shape regardless of provider. */
 export async function complete(opts: CallOpts): Promise<LLMResult> {
   const { config } = opts
+  const temperature = clampTemperature(config.provider, opts.temperature)
   if (config.provider === 'openai') {
     const res = await openaiClient(config).chat.completions.create({
       model: config.model,
       messages: [{ role: 'system', content: opts.system }, ...opts.messages],
       max_tokens: opts.maxTokens ?? 1024,
-      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
     })
     return {
       text: res.choices[0]?.message?.content ?? '',
@@ -160,7 +186,7 @@ export async function complete(opts: CallOpts): Promise<LLMResult> {
     system: opts.system,
     max_tokens: opts.maxTokens ?? 1024,
     messages: opts.messages,
-    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+    ...(temperature !== undefined ? { temperature } : {}),
   })
   const text = res.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
@@ -186,12 +212,13 @@ function anthropicStream(opts: CallOpts): LLMStream {
   let resolve!: (d: StreamDone) => void
   const done = new Promise<StreamDone>((r) => (resolve = r))
   async function* tokens(): AsyncGenerator<string> {
+    const temperature = clampTemperature('anthropic', opts.temperature)
     const s = anthropicClient(opts.config).messages.stream({
       model: opts.config.model,
       system: opts.system,
       max_tokens: opts.maxTokens ?? 1024,
       messages: opts.messages,
-      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
     })
     for await (const event of s) {
       if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
@@ -212,11 +239,12 @@ function openaiStream(opts: CallOpts): LLMStream {
   let resolve!: (d: StreamDone) => void
   const done = new Promise<StreamDone>((r) => (resolve = r))
   async function* tokens(): AsyncGenerator<string> {
+    const temperature = clampTemperature('openai', opts.temperature)
     const stream = await openaiClient(opts.config).chat.completions.create({
       model: opts.config.model,
       messages: [{ role: 'system', content: opts.system }, ...opts.messages],
       max_tokens: opts.maxTokens ?? 1024,
-      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
       stream: true,
       stream_options: { include_usage: true },
     })

@@ -1,16 +1,16 @@
-// Character-based chunker. We approximate ~4 chars/token, so the defaults map to
-// roughly 875 tokens per chunk with ~100 tokens of overlap. Splits prefer a
-// natural break (newline or space) near the window edge to avoid cutting words.
-
-const MAX_CHARS = 3500
-const OVERLAP_CHARS = 400
+// Character-based chunker. Splits prefer a natural break (newline or space) near
+// the window edge to avoid cutting words. The defaults come from env and are sized
+// to fit the shipped local embedder's real token cap — an oversized chunk would be
+// silently truncated at embed time, making its tail unsearchable. Long-context
+// embedders can raise CHUNK_MAX_CHARS for fewer, larger chunks.
+import { env } from '../env'
 
 export function chunkText(
   text: string,
   opts: { maxChars?: number; overlapChars?: number } = {},
 ): string[] {
-  const maxChars = opts.maxChars ?? MAX_CHARS
-  const overlapChars = opts.overlapChars ?? OVERLAP_CHARS
+  const maxChars = opts.maxChars ?? env.CHUNK_MAX_CHARS
+  const overlapChars = opts.overlapChars ?? env.CHUNK_OVERLAP_CHARS
 
   const clean = text.replace(/\r\n/g, '\n').trim()
   if (clean.length === 0) return []

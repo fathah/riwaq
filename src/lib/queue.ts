@@ -45,7 +45,11 @@ function getLearnQueue(): Queue {
 /** Enqueue ingestion (durable) or run it in-process when no queue is configured. */
 export async function enqueueIngest(p: IngestPayload): Promise<void> {
   if (!redisEnabled) {
-    void ingestText(p.documentId, p.knowledgeBaseId, p.text) // fire-and-forget fallback
+    // Fire-and-forget fallback. ingestText already swallows failures, but guard the
+    // promise so a bug there can never surface as an unhandled rejection.
+    void ingestText(p.documentId, p.knowledgeBaseId, p.text).catch((err) =>
+      console.error('[ingest] in-process ingest crashed', err),
+    )
     return
   }
   await getIngestQueue().add(INGEST, p, {
@@ -59,7 +63,11 @@ export async function enqueueIngest(p: IngestPayload): Promise<void> {
 /** Enqueue learning (durable) or run it in-process when no queue is configured. */
 export async function enqueueLearn(p: LearnPayload): Promise<void> {
   if (!redisEnabled) {
-    void processLearn(p)
+    // processLearn THROWS on any sub-task failure (by design, so a durable worker
+    // retries). In the no-Redis path it is fire-and-forget, so an uncaught rejection
+    // here would crash the whole process — a background learn failure must never
+    // take down chat. Swallow it (already logged inside processLearn).
+    void processLearn(p).catch(() => {})
     return
   }
   await getLearnQueue().add(LEARN, p, {

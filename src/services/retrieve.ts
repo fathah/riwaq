@@ -1,4 +1,4 @@
-import { eq, inArray, desc, sql, cosineDistance } from 'drizzle-orm'
+import { inArray, eq, sql, cosineDistance } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agentKnowledgeBases, chunks, documents, knowledgeBases } from '../db/schema'
 import { env } from '../env'
@@ -34,30 +34,41 @@ export async function searchChunks(
   const kbIds = await resolveAgentKbIds(agentId)
   if (kbIds.length === 0) return []
 
-  const similarity = sql<number>`1 - (${cosineDistance(chunks.embedding, queryEmbedding)})`
+  // CRITICAL: order by the raw cosine DISTANCE ascending (`embedding <=> query`).
+  // Only this exact shape lets the planner use the HNSW index. Ordering by
+  // `1 - distance DESC` (arithmetic-wrapped, reversed) forces a full scan + sort —
+  // fine on a toy table, catastrophic once a tenant's KB set holds real volume.
+  // Similarity is derived in the projection for display/thresholding only.
+  const distance = cosineDistance(chunks.embedding, queryEmbedding)
+  const similarity = sql<number>`1 - (${distance})`
 
-  const rows = await db
-    .select({
-      id: chunks.id,
-      content: chunks.content,
-      documentId: chunks.documentId,
-      documentName: documents.name,
-      knowledgeBaseId: chunks.knowledgeBaseId,
-      kbName: knowledgeBases.name,
-      similarity,
-    })
-    .from(chunks)
-    .innerJoin(documents, eq(documents.id, chunks.documentId))
-    .innerJoin(knowledgeBases, eq(knowledgeBases.id, chunks.knowledgeBaseId))
-    .where(inArray(chunks.knowledgeBaseId, kbIds))
-    .orderBy(desc(similarity))
-    .limit(k)
+  const rows = await db.transaction(async (tx) => {
+    // Raise the ANN candidate list so the per-KB filter doesn't starve recall
+    // (the classic filtered-HNSW cliff). SET LOCAL is scoped to this transaction.
+    await tx.execute(sql.raw(`SET LOCAL hnsw.ef_search = ${env.RETRIEVAL_HNSW_EF_SEARCH}`))
+    return tx
+      .select({
+        id: chunks.id,
+        content: chunks.content,
+        documentId: chunks.documentId,
+        documentName: documents.name,
+        knowledgeBaseId: chunks.knowledgeBaseId,
+        kbName: knowledgeBases.name,
+        similarity,
+      })
+      .from(chunks)
+      .innerJoin(documents, eq(documents.id, chunks.documentId))
+      .innerJoin(knowledgeBases, eq(knowledgeBases.id, chunks.knowledgeBaseId))
+      .where(inArray(chunks.knowledgeBaseId, kbIds))
+      .orderBy(distance)
+      .limit(k)
+  })
 
-  // Post-filter: drop weakly-relevant chunks (reduces cost + prompt-injection
-  // surface), then pack under a character budget so the prompt can't grow
-  // unbounded. Threshold defaults off (0) so retrieval never regresses until tuned.
-  // The total injected content never exceeds the budget — even a single oversized
-  // top hit is truncated rather than blowing past it.
+  // Post-filter: drop weakly-relevant chunks below RETRIEVAL_MIN_SIMILARITY
+  // (reduces cost, prompt-injection surface, and fabricated citations), then pack
+  // under a character budget so the prompt can't grow unbounded. The total injected
+  // content never exceeds the budget — even a single oversized top hit is truncated
+  // rather than blowing past it.
   const out: RetrievedChunk[] = []
   let budget = env.RETRIEVAL_CHAR_BUDGET
   for (const r of rows) {

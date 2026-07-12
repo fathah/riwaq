@@ -83,10 +83,62 @@ const schema = z.object({
 
   // --- Retrieval tuning ---
   // Drop retrieved chunks below this cosine similarity (0..1). 0 = keep all.
-  // Calibrate per embedding model; left off by default so behavior never regresses.
-  RETRIEVAL_MIN_SIMILARITY: z.coerce.number().min(0).max(1).default(0),
+  // A small floor stops clearly-irrelevant chunks being surfaced as "citations"
+  // for off-topic questions. Calibrate per embedding model.
+  RETRIEVAL_MIN_SIMILARITY: z.coerce.number().min(0).max(1).default(0.2),
   // Cap total characters of retrieved context injected into the prompt (token budget guard).
   RETRIEVAL_CHAR_BUDGET: z.coerce.number().int().positive().default(12_000),
+  // HNSW candidate-list size for ANN search. Higher = better recall (esp. for the
+  // KB-filtered case) at some latency cost. pgvector default is 40; we raise it so
+  // per-tenant filters don't starve the candidate set.
+  RETRIEVAL_HNSW_EF_SEARCH: z.coerce.number().int().positive().default(100),
+  // A question at least this cosine-similar to a topic centroid joins that cluster.
+  TOPIC_MATCH_THRESHOLD: z.coerce.number().min(0).max(1).default(0.6),
+  // Chunking. Defaults are sized to fit the shipped local embedder
+  // (all-MiniLM-L6-v2, ~256-token cap ≈ 1000 chars) so no chunk is silently
+  // truncated at embed time. Raise these for long-context embedders (Voyage/OpenAI).
+  CHUNK_MAX_CHARS: z.coerce.number().int().positive().default(1000),
+  CHUNK_OVERLAP_CHARS: z.coerce.number().int().nonnegative().default(150),
+  // Cap total characters of prior-turn history injected into a prompt (token guard;
+  // applies to DB history and client-supplied OpenAI history alike).
+  HISTORY_CHAR_BUDGET: z.coerce.number().int().positive().default(8_000),
+  // Bound long-term memory rows per (agent, end user) so memory can't grow forever.
+  MEMORY_MAX_PER_USER: z.coerce.number().int().positive().default(500),
+
+  // --- Self-learning ---
+  // An up-voted question this cosine-similar to an existing learned-answer
+  // candidate is treated as the SAME question (endorsements accrue to one row).
+  LEARNED_DEDUP_SIMILARITY: z.coerce.number().min(0).max(1).default(0.9),
+  // A question whose best retrieved chunk was below this similarity is counted as a
+  // knowledge gap in the learning report.
+  LEARNING_GAP_SIMILARITY: z.coerce.number().min(0).max(1).default(0.25),
+
+  // --- Reminders / scheduler ---
+  // Run the due-reminder poller in this process. Disable on nodes that should not
+  // fire reminders (e.g. a dedicated worker split later).
+  REMINDER_SCHEDULER_ENABLED: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('1')
+    .transform((v) => v === '1' || v === 'true'),
+  REMINDER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  REMINDER_BATCH: z.coerce.number().int().positive().default(50),
+  REMINDER_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  REMINDER_WEBHOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  // Auto-create reminders from dated commitments the LLM detects in conversations.
+  // Adds one cheap LLM call per chat turn — set to 0 to disable.
+  REMINDER_AUTO_EXTRACT: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('1')
+    .transform((v) => v === '1' || v === 'true'),
+  // Guardrails for auto-extracted reminders: bound how far out and how many per user.
+  REMINDER_MAX_HORIZON_DAYS: z.coerce.number().int().positive().default(1825), // ~5y
+  REMINDER_MAX_PER_USER: z.coerce.number().int().positive().default(100),
+
+  // --- Database pool ---
+  DB_POOL_MAX: z.coerce.number().int().positive().default(10),
+  // Server-side statement timeout (ms). Stops a runaway query from pinning a pooled
+  // connection. 0 disables. Kept comfortably above normal chat/ingest query time.
+  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(30_000),
 
   PORT: z.coerce.number().default(3000),
 }).superRefine((value, ctx) => {

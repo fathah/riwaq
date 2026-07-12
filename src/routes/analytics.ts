@@ -15,7 +15,9 @@ analyticsRoute.get('/agents/:id/analytics/top-questions', async (c) => {
   const agent = await getAgentInOrg(c.req.param('id'), orgId)
   if (!agent) return c.json({ error: 'agent not found' }, 404)
 
-  const limit = Math.min(Number(c.req.query('limit') ?? 20) || 20, 100)
+  // Clamp to [1,100]; a negative/NaN limit would otherwise reach `LIMIT -5` → 500.
+  const requested = Number(c.req.query('limit'))
+  const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), 100) : 20
   const rows = await db
     .select({ label: topics.label, count: topics.count, lastSeen: topics.lastSeen })
     .from(topics)

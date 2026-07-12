@@ -17,11 +17,31 @@ import { chatRoute } from './routes/chat'
 import { openaiRoute } from './routes/openai'
 import { feedbackRoute } from './routes/feedback'
 import { analyticsRoute } from './routes/analytics'
+import { learningRoute } from './routes/learning'
+import { remindersRoute } from './routes/reminders'
+import { startReminderScheduler, stopReminderScheduler } from './services/reminders'
 import { operations, operationalMetrics } from './middleware/operations'
 import { getRedis } from './lib/redis'
 import { openApiDocument } from './openapi'
+import { ChatError } from './services/chat'
 
 export const app = new Hono<AppEnv>()
+
+// Single error boundary. Without it, any unexpected throw — a provider 4xx/5xx, a
+// missing API key, a bad-UUID cast (Postgres 22P02) — returns Hono's default
+// text/plain 500, breaking both the native `{error}` and the OpenAI `{error:{…}}`
+// contracts. Here we map to the right status + envelope for the path.
+app.onError((err, c) => {
+  const status = errorStatus(err)
+  const message = status >= 500 ? 'internal error' : errorMessage(err)
+  if (status >= 500) console.error('[error]', c.req.method, c.req.path, err)
+  if (c.req.path.startsWith('/v1/')) {
+    const type = status >= 500 ? 'api_error' : 'invalid_request_error'
+    return c.json({ error: { message, type, code: null } }, status as 400)
+  }
+  return c.json({ error: message }, status as 400)
+})
+
 app.use('*', operations)
 // Reject oversized request bodies at the boundary before any handler buffers them.
 app.use('*', bodyLimit({ maxSize: env.MAX_BODY_BYTES, onError: (c) => c.json({ error: 'request body too large' }, 413) }))
@@ -63,6 +83,24 @@ app.route('/', chatRoute)
 app.route('/', openaiRoute)
 app.route('/', feedbackRoute)
 app.route('/', analyticsRoute)
+app.route('/', learningRoute)
+app.route('/', remindersRoute)
+
+// Map a thrown error to an HTTP status. ChatError carries its own; provider SDK
+// errors expose a numeric `status`; a Postgres UUID cast error is a client 400;
+// everything else is an unexpected 500.
+function errorStatus(err: unknown): number {
+  if (err instanceof ChatError) return err.status
+  const anyErr = err as { status?: unknown; code?: unknown }
+  if (typeof anyErr?.status === 'number' && anyErr.status >= 400 && anyErr.status < 600) return anyErr.status
+  if (anyErr?.code === '22P02') return 400 // invalid text representation (e.g. bad uuid)
+  return 500
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message
+  return 'request failed'
+}
 
 async function main() {
   await migrate()
@@ -76,6 +114,10 @@ async function main() {
   // Durable job workers (no-op unless REDIS_URL is set).
   startWorkers()
   console.log(`[riwaq] durable jobs: ${redisEnabled ? 'DragonflyDB/Redis' : 'in-process fallback'}`)
+
+  // Reminder scheduler: polls due reminders and fires signed webhooks. Multi-node
+  // safe (FOR UPDATE SKIP LOCKED), so every replica may run it.
+  startReminderScheduler()
 
   const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {
     console.log(`[riwaq] listening on http://localhost:${info.port}`)
@@ -110,7 +152,8 @@ async function main() {
     } finally {
       if (forceTimer) clearTimeout(forceTimer)
     }
-    // Stop workers first (finish in-flight jobs), then the DB pool and Redis.
+    // Stop the reminder poller, then workers (finish in-flight jobs), then DB/Redis.
+    stopReminderScheduler()
     await closeQueues().catch((err) => console.error('[riwaq] error closing queues', err))
     try {
       await sql.end({ timeout: 5 })

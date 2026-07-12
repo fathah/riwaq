@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
-import { and, eq } from 'drizzle-orm'
+import { and, desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { documents, knowledgeBases } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
@@ -10,6 +10,8 @@ import { enqueueIngest } from '../lib/queue'
 import { env } from '../env'
 import type { AppEnv } from '../types'
 import { assertStorageQuota, QuotaExceededError } from '../services/usage'
+import { isUuid } from '../lib/uuid'
+import { pageParams } from '../lib/pagination'
 
 export const documentsRoute = new Hono<AppEnv>()
 documentsRoute.use('*', orgAuth)
@@ -134,13 +136,20 @@ documentsRoute.post('/agents/:id/documents', async (c) => {
   return c.json({ documentId: doc.id, name: doc.name, status: doc.status, knowledgeBaseId: defaultKb.id }, 202)
 })
 
-// List documents in a KB.
+// List documents in a KB (paginated, newest first).
 documentsRoute.get('/knowledge-bases/:kbId/documents', async (c) => {
   const orgId = c.get('orgId')
   const kb = await getKbInOrg(c.req.param('kbId'), orgId)
   if (!kb) return c.json({ error: 'knowledge base not found' }, 404)
 
-  const rows = await db.select().from(documents).where(eq(documents.knowledgeBaseId, kb.id))
+  const { limit, offset } = pageParams((n) => c.req.query(n))
+  const rows = await db
+    .select()
+    .from(documents)
+    .where(eq(documents.knowledgeBaseId, kb.id))
+    .orderBy(desc(documents.createdAt))
+    .limit(limit)
+    .offset(offset)
   return c.json(rows)
 })
 
@@ -150,8 +159,13 @@ documentsRoute.delete('/knowledge-bases/:kbId/documents/:docId', async (c) => {
   const kb = await getKbInOrg(c.req.param('kbId'), orgId)
   if (!kb) return c.json({ error: 'knowledge base not found' }, 404)
 
-  await db
+  const docId = c.req.param('docId')
+  if (!isUuid(docId)) return c.json({ error: 'document not found' }, 404)
+
+  const deleted = await db
     .delete(documents)
-    .where(and(eq(documents.id, c.req.param('docId')), eq(documents.knowledgeBaseId, kb.id)))
+    .where(and(eq(documents.id, docId), eq(documents.knowledgeBaseId, kb.id)))
+    .returning({ id: documents.id })
+  if (deleted.length === 0) return c.json({ error: 'document not found' }, 404)
   return c.json({ ok: true })
 })

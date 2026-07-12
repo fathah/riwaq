@@ -2,16 +2,17 @@ import { and, desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agents, conversations, messages } from '../db/schema'
 import { embedOne } from '../lib/embeddings'
-import { complete, streamText, type ChatMessage, type FinishReason, type LlmConfig } from '../lib/llm'
+import { complete, streamText, type ChatMessage, type FinishReason, type LlmConfig, type StreamDone } from '../lib/llm'
 import { searchChunks } from './retrieve'
 import { recallMemories } from './memory'
 import { resolveLlmConfig } from './llm-config'
 import { buildSystemPrompt } from '../prompts/system'
 import { enqueueLearn } from '../lib/queue'
 import { assertChatQuota, recordChatUsage, QuotaExceededError } from './usage'
+import { env } from '../env'
 
 const TOP_K = 6
-const HISTORY_TURNS = 10
+const HISTORY_MESSAGES = 10
 
 export type Agent = typeof agents.$inferSelect
 
@@ -122,7 +123,9 @@ export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTur
     recallMemories(agent.id, endUserId, queryEmbedding),
     input.historyOverride ? Promise.resolve([] as ChatMessage[]) : loadHistory(conversationId),
   ])
-  const history = input.historyOverride ?? dbHistory
+  // Bound history characters so neither long DB turns nor an arbitrarily large
+  // client-supplied OpenAI history can blow the model's context window.
+  const history = budgetHistory(input.historyOverride ?? dbHistory, env.HISTORY_CHAR_BUDGET)
 
   // 5. Compose the prompt.
   const system = buildSystemPrompt({
@@ -141,6 +144,9 @@ export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTur
     similarity: Number(r.similarity.toFixed(4)),
   }))
   const usedChunkIds = retrieved.map((r) => r.id)
+  // Best retrieval similarity (post-threshold). 0 ⇒ nothing cleared the floor ⇒ a
+  // likely knowledge gap. Recorded per question for the learning report.
+  const topSimilarity = retrieved[0]?.similarity ?? 0
 
   // Persist the user message now so the learning loop can reference it.
   const [userMsg] = await db
@@ -168,6 +174,7 @@ export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTur
       userMessage: message,
       assistantMessage: answer,
       questionEmbedding: queryEmbedding,
+      topSimilarity,
       provider: agent.provider,
       model: agent.model,
     }).catch((err) => console.error('[learn] enqueue failed', err))
@@ -176,18 +183,21 @@ export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTur
   return { conversationId, system, llmMessages, citations, llm, finalize }
 }
 
+type RunOpts = { maxTokens?: number; temperature?: number }
+
 /**
- * Run a full non-streaming turn and return the canonical {@link ChatResult}.
- * Serializers turn this into whatever wire format the caller asked for.
+ * Run a full non-streaming turn from an already-prepared turn. Splitting prepare
+ * from run lets routes surface pre-flight failures (quota 429, 404, 403) as real
+ * HTTP status codes before any streaming body is opened.
  */
-export async function runChatTurn(input: ChatTurnInput): Promise<ChatResult> {
-  const { system, llmMessages, citations, conversationId, llm, finalize } = await prepareChatTurn(input)
+export async function runPrepared(prepared: PreparedTurn, opts: RunOpts = {}): Promise<ChatResult> {
+  const { system, llmMessages, citations, conversationId, llm, finalize } = prepared
   const res = await complete({
     config: llm,
     system,
     messages: llmMessages,
-    ...(input.maxTokens ? { maxTokens: input.maxTokens } : {}),
-    ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+    ...(opts.maxTokens ? { maxTokens: opts.maxTokens } : {}),
+    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
   })
   await finalize(res.text, res.inputTokens, res.outputTokens)
   return {
@@ -201,28 +211,48 @@ export async function runChatTurn(input: ChatTurnInput): Promise<ChatResult> {
 }
 
 /**
- * Run a streaming turn, yielding canonical {@link ChatStreamEvent}s (meta → token*
- * → done). Persistence + learning happen before the final `done` event. Serializers
- * map these events to native SSE or OpenAI chunks.
+ * Stream a turn from an already-prepared turn, yielding canonical
+ * {@link ChatStreamEvent}s (meta → token* → done).
+ *
+ * `finalize` runs in a `finally`, so even if the client disconnects mid-stream
+ * (the consumer stops iterating → the generator is returned), the assistant
+ * message is still persisted, usage is recorded, and learning is enqueued —
+ * exactly once. Without this, an aborted stream silently loses the turn and its
+ * token accounting (a quota-dodge hole).
  */
-export async function* streamChatTurn(input: ChatTurnInput): AsyncGenerator<ChatStreamEvent> {
-  const { system, llmMessages, citations, conversationId, llm, finalize } = await prepareChatTurn(input)
+export async function* streamPrepared(prepared: PreparedTurn, opts: RunOpts = {}): AsyncGenerator<ChatStreamEvent> {
+  const { system, llmMessages, citations, conversationId, llm, finalize } = prepared
   yield { type: 'meta', conversationId, citations, model: llm.model }
 
   let answer = ''
+  let done: StreamDone | undefined
+  let finalized = false
+  const runFinalize = async () => {
+    if (finalized) return
+    finalized = true
+    await finalize(answer, done?.inputTokens ?? 0, done?.outputTokens ?? 0).catch((err) =>
+      console.error('[chat] finalize failed', err),
+    )
+  }
+
   const s = streamText({
     config: llm,
     system,
     messages: llmMessages,
-    ...(input.maxTokens ? { maxTokens: input.maxTokens } : {}),
-    ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+    ...(opts.maxTokens ? { maxTokens: opts.maxTokens } : {}),
+    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
   })
-  for await (const token of s.tokens) {
-    answer += token
-    yield { type: 'token', text: token }
+  try {
+    for await (const token of s.tokens) {
+      answer += token
+      yield { type: 'token', text: token }
+    }
+    done = await s.done
+    await runFinalize()
+  } finally {
+    // Covers early-return (client disconnect) where the try block didn't complete.
+    await runFinalize()
   }
-  const done = await s.done
-  await finalize(answer, done.inputTokens, done.outputTokens)
 
   yield {
     type: 'done',
@@ -231,10 +261,22 @@ export async function* streamChatTurn(input: ChatTurnInput): AsyncGenerator<Chat
       answer,
       citations,
       model: llm.model,
-      usage: { inputTokens: done.inputTokens, outputTokens: done.outputTokens },
-      finishReason: done.finishReason,
+      usage: { inputTokens: done?.inputTokens ?? 0, outputTokens: done?.outputTokens ?? 0 },
+      finishReason: done?.finishReason ?? 'other',
     },
   }
+}
+
+/** Convenience: prepare + run in one call (native non-streaming path). */
+export async function runChatTurn(input: ChatTurnInput): Promise<ChatResult> {
+  const prepared = await prepareChatTurn(input)
+  return runPrepared(prepared, { maxTokens: input.maxTokens, temperature: input.temperature })
+}
+
+/** Convenience: prepare + stream in one call. */
+export async function* streamChatTurn(input: ChatTurnInput): AsyncGenerator<ChatStreamEvent> {
+  const prepared = await prepareChatTurn(input)
+  yield* streamPrepared(prepared, { maxTokens: input.maxTokens, temperature: input.temperature })
 }
 
 async function loadHistory(conversationId: string): Promise<ChatMessage[]> {
@@ -243,8 +285,26 @@ async function loadHistory(conversationId: string): Promise<ChatMessage[]> {
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
     .orderBy(desc(messages.createdAt))
-    .limit(HISTORY_TURNS)
+    .limit(HISTORY_MESSAGES)
   return rows
     .reverse()
     .map((r) => ({ role: r.role === 'assistant' ? 'assistant' : 'user', content: r.content }))
+}
+
+/**
+ * Keep the most recent history messages that fit within a character budget
+ * (walking backward from the latest). Guards the context window regardless of
+ * whether history came from the DB or a client-supplied OpenAI `messages` array.
+ */
+function budgetHistory(history: ChatMessage[], budget: number): ChatMessage[] {
+  const kept: ChatMessage[] = []
+  let remaining = budget
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i]!
+    const cost = msg.content.length
+    if (cost > remaining) break
+    remaining -= cost
+    kept.push(msg)
+  }
+  return kept.reverse()
 }
