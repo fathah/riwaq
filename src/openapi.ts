@@ -1,49 +1,404 @@
+// Hand-maintained OpenAPI 3.1 description of the Riwaq HTTP surface. Kept in sync
+// with the routes; served at GET /openapi.json. Bodies/queries are validated with
+// zod at the route layer — this document is the published contract.
+
+const agentIdParam = {
+  name: 'id',
+  in: 'path',
+  required: true,
+  schema: { type: 'string', format: 'uuid' },
+  description: 'Agent id',
+} as const
+
+const pageParams = [
+  { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200 } },
+  { name: 'offset', in: 'query', required: false, schema: { type: 'integer', minimum: 0 } },
+] as const
+
 export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Riwaq API',
-    version: '1.0.0',
-    description: 'Multi-tenant RAG, memory, analytics, and OpenAI-compatible chat API.',
+    version: '1.1.0',
+    description:
+      'Multi-tenant AI agent infrastructure: RAG + per-agent memory + question analytics, ' +
+      'a per-org self-learning loop, scheduled reminders with signed webhooks, and an ' +
+      'OpenAI-compatible chat surface. Isolation by default; sharing by opt-in.',
   },
   servers: [{ url: '/' }],
+  tags: [
+    { name: 'Organizations' },
+    { name: 'Agents' },
+    { name: 'Knowledge' },
+    { name: 'Chat' },
+    { name: 'OpenAI-compatible' },
+    { name: 'Analytics' },
+    { name: 'Self-learning' },
+    { name: 'Reminders' },
+    { name: 'Ops' },
+  ],
   components: {
     securitySchemes: {
-      orgApiKey: { type: 'http', scheme: 'bearer' },
-      endUserToken: { type: 'apiKey', in: 'header', name: 'X-End-User-Token' },
+      orgApiKey: {
+        type: 'http',
+        scheme: 'bearer',
+        description: 'Organization API key from POST /organizations (Authorization: Bearer <key>).',
+      },
+      endUserToken: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-End-User-Token',
+        description: 'Short-lived HMAC token signed by the org backend; required for chat in production.',
+      },
     },
     schemas: {
-      Error: { type: 'object', required: ['error'], properties: { error: {} } },
+      Error: {
+        type: 'object',
+        required: ['error'],
+        properties: { error: { description: 'String message, or a validation-issue object.' } },
+      },
+      OpenAIError: {
+        type: 'object',
+        required: ['error'],
+        properties: {
+          error: {
+            type: 'object',
+            properties: { message: { type: 'string' }, type: { type: 'string' }, code: { type: ['string', 'null'] } },
+          },
+        },
+      },
+      Citation: {
+        type: 'object',
+        properties: {
+          chunkId: { type: 'string', format: 'uuid' },
+          documentId: { type: 'string', format: 'uuid' },
+          documentName: { type: 'string' },
+          knowledgeBaseId: { type: 'string', format: 'uuid' },
+          kbName: { type: 'string' },
+          similarity: { type: 'number' },
+        },
+      },
       NativeChatRequest: {
-        type: 'object', required: ['message'],
-        properties: { conversationId: { type: 'string', format: 'uuid' }, endUserId: { type: 'string' }, message: { type: 'string', minLength: 1 } },
+        type: 'object',
+        required: ['message'],
+        properties: {
+          conversationId: { type: 'string', format: 'uuid', description: 'Resume an existing conversation.' },
+          endUserId: { type: 'string', description: 'Required unless supplied by X-End-User-Token; ignored in production.' },
+          message: { type: 'string', minLength: 1 },
+        },
       },
       NativeChatResult: {
-        type: 'object', required: ['conversationId', 'answer', 'citations', 'model', 'usage', 'finishReason'],
+        type: 'object',
+        required: ['conversationId', 'answer', 'citations', 'model', 'usage', 'finishReason'],
         properties: {
-          conversationId: { type: 'string', format: 'uuid' }, answer: { type: 'string' },
-          citations: { type: 'array', items: { type: 'object' } }, model: { type: 'string' },
-          usage: { type: 'object' }, finishReason: { type: 'string' },
+          conversationId: { type: 'string', format: 'uuid' },
+          answer: { type: 'string' },
+          citations: { type: 'array', items: { $ref: '#/components/schemas/Citation' } },
+          model: { type: 'string' },
+          usage: {
+            type: 'object',
+            properties: { inputTokens: { type: 'integer' }, outputTokens: { type: 'integer' } },
+          },
+          finishReason: { type: 'string', enum: ['stop', 'length', 'tool_use', 'content_filter', 'other'] },
+        },
+      },
+      CreateAgentRequest: {
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string', minLength: 1, maxLength: 200 },
+          systemPrompt: { type: 'string' },
+          provider: { type: 'string', enum: ['anthropic', 'openai'] },
+          model: { type: 'string' },
+        },
+      },
+      LearningReport: {
+        type: 'object',
+        properties: {
+          coverage: {
+            type: 'object',
+            properties: {
+              totalQuestions: { type: 'integer' },
+              answered: { type: 'integer' },
+              unanswered: { type: 'integer' },
+              answerRate: { type: ['number', 'null'] },
+            },
+          },
+          gaps: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { topic: { type: 'string' }, count: { type: 'integer' }, avgSimilarity: { type: 'number' } },
+            },
+          },
+          learned: {
+            type: 'object',
+            properties: {
+              pending: { type: 'integer' },
+              approved: { type: 'integer' },
+              rejected: { type: 'integer' },
+            },
+          },
+        },
+      },
+      LearnedAnswer: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          question: { type: 'string' },
+          answer: { type: 'string' },
+          status: { type: 'string', enum: ['pending', 'approved', 'rejected'] },
+          distinctUserCount: { type: 'integer' },
+          promotedDocumentId: { type: ['string', 'null'], format: 'uuid' },
+        },
+      },
+      CreateReminderRequest: {
+        type: 'object',
+        required: ['title', 'dueAt'],
+        description: 'Provide either `message` (static) or `prompt` (agent composes at fire time).',
+        properties: {
+          title: { type: 'string', minLength: 1, maxLength: 200 },
+          message: { type: 'string', maxLength: 4000 },
+          prompt: { type: 'string', maxLength: 4000 },
+          dueAt: { type: 'string', format: 'date-time', description: 'Must be in the future.' },
+          recurrence: { type: ['string', 'null'], enum: ['daily', 'weekly', 'monthly', 'yearly', null] },
+          endUserId: { type: 'string' },
+        },
+      },
+      Reminder: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          agentId: { type: 'string', format: 'uuid' },
+          endUserId: { type: ['string', 'null'] },
+          title: { type: 'string' },
+          message: { type: ['string', 'null'] },
+          prompt: { type: ['string', 'null'] },
+          dueAt: { type: 'string', format: 'date-time' },
+          recurrence: { type: ['string', 'null'] },
+          status: { type: 'string', enum: ['scheduled', 'firing', 'completed', 'error', 'cancelled'] },
+          source: { type: 'string', enum: ['api', 'auto'] },
+          nextFireAt: { type: 'string', format: 'date-time' },
+          fireCount: { type: 'integer' },
+          lastFiredAt: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+      ReminderDelivery: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          reminderId: { type: 'string', format: 'uuid' },
+          status: { type: 'string', enum: ['ok', 'failed', 'skipped'] },
+          responseCode: { type: ['integer', 'null'] },
+          error: { type: ['string', 'null'] },
+          firedAt: { type: 'string', format: 'date-time' },
         },
       },
     },
   },
   paths: {
-    '/health': { get: { summary: 'Liveness and database health', responses: { '200': { description: 'Healthy' }, '503': { description: 'Unavailable' } } } },
-    '/ready': { get: { summary: 'Database and queue dependency readiness', responses: { '200': { description: 'Ready' }, '503': { description: 'Not ready' } } } },
-    '/organizations': { post: { summary: 'Provision an organization', responses: { '201': { description: 'Created' }, '401': { description: 'Admin token required' } } } },
-    '/organizations/usage': { get: { summary: 'Current persistent usage and configured ceilings', security: [{ orgApiKey: [] }], responses: { '200': { description: 'Usage snapshot' } } } },
-    '/agents/{id}/chat': {
+    // --- Ops ---
+    '/health': {
+      get: { tags: ['Ops'], summary: 'Liveness and database health', responses: { '200': { description: 'Healthy' }, '503': { description: 'Unavailable' } } },
+    },
+    '/ready': {
+      get: { tags: ['Ops'], summary: 'Database and queue dependency readiness', responses: { '200': { description: 'Ready' }, '503': { description: 'Not ready' } } },
+    },
+    '/metrics': {
+      get: { tags: ['Ops'], summary: 'Prometheus metrics (admin-token protected)', responses: { '200': { description: 'Metrics text' }, '404': { description: 'Not found (bad/absent admin token)' } } },
+    },
+    '/openapi.json': {
+      get: { tags: ['Ops'], summary: 'This document', responses: { '200': { description: 'OpenAPI 3.1 document' } } },
+    },
+
+    // --- Organizations ---
+    '/organizations': {
       post: {
-        summary: 'Run the canonical Riwaq chat pipeline',
-        security: [{ orgApiKey: [], endUserToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
-        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/NativeChatRequest' } } } },
-        responses: { '200': { description: 'Canonical chat result', content: { 'application/json': { schema: { $ref: '#/components/schemas/NativeChatResult' } } } }, '401': { description: 'Authentication failed' }, '429': { description: 'Rate or quota exceeded' } },
+        tags: ['Organizations'],
+        summary: 'Provision an organization (public; admin-token gated when ADMIN_TOKEN is set)',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string', minLength: 1, maxLength: 200 } } } } } },
+        responses: { '201': { description: 'Created — returns apiKey ONCE' }, '401': { description: 'Admin token required' }, '429': { description: 'Signup rate limited' } },
       },
     },
-    '/v1/chat/completions': {
-      post: { summary: 'OpenAI-compatible chat completions', security: [{ orgApiKey: [], endUserToken: [] }], responses: { '200': { description: 'OpenAI chat completion or SSE stream' }, '429': { description: 'Rate or quota exceeded' } } },
+    '/organizations/me': {
+      get: { tags: ['Organizations'], summary: 'Current org + LLM config (key masked)', security: [{ orgApiKey: [] }], responses: { '200': { description: 'Org' } } },
     },
-    '/v1/models': { get: { summary: 'List agents as OpenAI models', security: [{ orgApiKey: [] }], responses: { '200': { description: 'Model list' } } } },
+    '/organizations/usage': {
+      get: { tags: ['Organizations'], summary: 'Persistent usage + live storage counts and ceilings', security: [{ orgApiKey: [] }], responses: { '200': { description: 'Usage snapshot' } } },
+    },
+    '/organizations/llm': {
+      put: {
+        tags: ['Organizations'],
+        summary: 'Set org LLM config (null clears a field → falls back to .env)',
+        security: [{ orgApiKey: [] }],
+        requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { provider: { type: ['string', 'null'], enum: ['anthropic', 'openai', null] }, baseUrl: { type: ['string', 'null'], format: 'uri' }, apiKey: { type: ['string', 'null'] }, model: { type: ['string', 'null'] } } } } } },
+        responses: { '200': { description: 'Updated (key masked)' }, '400': { description: 'Invalid / SSRF-rejected baseUrl' } },
+      },
+    },
+    '/organizations/learning': {
+      put: {
+        tags: ['Self-learning'],
+        summary: 'Set the distinct-user auto-promotion threshold (0 = operator approval only)',
+        security: [{ orgApiKey: [] }],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['autoPromoteThreshold'], properties: { autoPromoteThreshold: { type: 'integer', minimum: 0 } } } } } },
+        responses: { '200': { description: 'Updated' } },
+      },
+    },
+    '/organizations/webhook': {
+      put: {
+        tags: ['Reminders'],
+        summary: 'Set the signed reminder webhook (returns the signing secret ONCE); url:null disables',
+        security: [{ orgApiKey: [] }],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['url'], properties: { url: { type: ['string', 'null'], format: 'uri' }, secret: { type: 'string', minLength: 16, maxLength: 200 } } } } } },
+        responses: { '200': { description: 'Updated' }, '400': { description: 'Invalid / SSRF-rejected url' } },
+      },
+    },
+
+    // --- Agents ---
+    '/agents': {
+      post: {
+        tags: ['Agents'],
+        summary: 'Create an agent (auto-creates its private KB)',
+        security: [{ orgApiKey: [] }],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/CreateAgentRequest' } } } },
+        responses: { '201': { description: 'Created — { agent, privateKbId }' } },
+      },
+    },
+    '/agents/{id}': {
+      get: { tags: ['Agents'], summary: 'Agent + linked KBs + effectiveLlm', security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '200': { description: 'Agent' }, '404': { description: 'Not found' } } },
+    },
+
+    // --- Knowledge bases + documents ---
+    '/knowledge-bases': {
+      post: { tags: ['Knowledge'], summary: 'Create a shared KB', security: [{ orgApiKey: [] }], responses: { '201': { description: 'Created' } } },
+      get: { tags: ['Knowledge'], summary: "List the org's KBs (paginated)", security: [{ orgApiKey: [] }], parameters: [...pageParams], responses: { '200': { description: 'KBs' } } },
+    },
+    '/agents/{id}/knowledge-bases': {
+      get: { tags: ['Knowledge'], summary: 'KBs an agent can read (private + shared)', security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '200': { description: 'KBs' } } },
+      post: {
+        tags: ['Knowledge'],
+        summary: 'Link a shared KB to an agent',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['knowledgeBaseId'], properties: { knowledgeBaseId: { type: 'string', format: 'uuid' } } } } } },
+        responses: { '201': { description: 'Linked' }, '400': { description: 'Cannot link a private KB' }, '404': { description: 'Not found' } },
+      },
+    },
+    '/agents/{id}/knowledge-bases/{kbId}': {
+      delete: { tags: ['Knowledge'], summary: 'Unlink a shared KB (never the private KB)', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'kbId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Unlinked' }, '400': { description: 'Refused (private KB)' } } },
+    },
+    '/knowledge-bases/{kbId}/documents': {
+      post: {
+        tags: ['Knowledge'],
+        summary: 'Upload a document (multipart file, or JSON { text, name }) → async ingest',
+        security: [{ orgApiKey: [] }],
+        parameters: [{ name: 'kbId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        requestBody: { content: { 'multipart/form-data': { schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' }, name: { type: 'string' } } } }, 'application/json': { schema: { type: 'object', properties: { text: { type: 'string' }, name: { type: 'string' } } } } } },
+        responses: { '202': { description: 'Accepted (processing)' }, '413': { description: 'Too large' }, '429': { description: 'Storage quota exceeded' } },
+      },
+      get: { tags: ['Knowledge'], summary: 'List documents in a KB (paginated)', security: [{ orgApiKey: [] }], parameters: [{ name: 'kbId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, ...pageParams], responses: { '200': { description: 'Documents' } } },
+    },
+    '/agents/{id}/documents': {
+      post: { tags: ['Knowledge'], summary: "Convenience: upload into the agent's private KB", security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '202': { description: 'Accepted' } } },
+    },
+    '/knowledge-bases/{kbId}/documents/{docId}': {
+      delete: { tags: ['Knowledge'], summary: 'Delete a document (cascades to chunks)', security: [{ orgApiKey: [] }], parameters: [{ name: 'kbId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'docId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Deleted' }, '404': { description: 'Not found' } } },
+    },
+
+    // --- Chat ---
+    '/agents/{id}/chat': {
+      post: {
+        tags: ['Chat'],
+        summary: 'Run the canonical Riwaq chat pipeline',
+        description: 'Add ?stream=1 for SSE (meta → token → done); add ?format=openai for the OpenAI projection.',
+        security: [{ orgApiKey: [], endUserToken: [] }],
+        parameters: [
+          agentIdParam,
+          { name: 'stream', in: 'query', required: false, schema: { type: 'string', enum: ['1'] } },
+          { name: 'format', in: 'query', required: false, schema: { type: 'string', enum: ['native', 'openai'] } },
+        ],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/NativeChatRequest' } } } },
+        responses: {
+          '200': { description: 'Canonical chat result (or SSE stream)', content: { 'application/json': { schema: { $ref: '#/components/schemas/NativeChatResult' } } } },
+          '401': { description: 'Authentication failed' },
+          '403': { description: 'Conversation belongs to another end user' },
+          '404': { description: 'Agent or conversation not found' },
+          '429': { description: 'Rate or quota exceeded' },
+        },
+      },
+    },
+    '/messages/{id}/feedback': {
+      post: {
+        tags: ['Chat'],
+        summary: 'Rate an assistant message (up feeds the self-learning loop; down flags a gap)',
+        security: [{ orgApiKey: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['rating'], properties: { rating: { type: 'string', enum: ['up', 'down'] } } } } } },
+        responses: { '200': { description: 'Recorded' }, '404': { description: 'Message not found' } },
+      },
+    },
+
+    // --- Analytics + self-learning ---
+    '/agents/{id}/analytics/top-questions': {
+      get: { tags: ['Analytics'], summary: 'Most-asked topics (auto-clustered)', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100 } }], responses: { '200': { description: 'Topics' } } },
+    },
+    '/agents/{id}/analytics/learning': {
+      get: { tags: ['Self-learning'], summary: 'Knowledge gaps, answer coverage, learned-answer pipeline', security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '200': { description: 'Learning report', content: { 'application/json': { schema: { $ref: '#/components/schemas/LearningReport' } } } } } },
+    },
+    '/agents/{id}/learned-answers': {
+      get: {
+        tags: ['Self-learning'],
+        summary: 'List learned-answer candidates (optionally by status)',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam, { name: 'status', in: 'query', required: false, schema: { type: 'string', enum: ['pending', 'approved', 'rejected'] } }, ...pageParams],
+        responses: { '200': { description: 'Candidates', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/LearnedAnswer' } } } } } },
+      },
+    },
+    '/agents/{id}/learned-answers/{laId}/approve': {
+      post: { tags: ['Self-learning'], summary: 'Operator approval → promote into the KB', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'laId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Promoted' }, '404': { description: 'No pending candidate' } } },
+    },
+    '/agents/{id}/learned-answers/{laId}/reject': {
+      post: { tags: ['Self-learning'], summary: 'Operator rejection (never re-clustered)', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'laId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Rejected' }, '404': { description: 'No pending candidate' } } },
+    },
+
+    // --- Reminders ---
+    '/agents/{id}/reminders': {
+      post: {
+        tags: ['Reminders'],
+        summary: 'Schedule a reminder (fires a signed webhook at due time)',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/CreateReminderRequest' } } } },
+        responses: { '201': { description: 'Created', content: { 'application/json': { schema: { $ref: '#/components/schemas/Reminder' } } } }, '400': { description: 'Invalid (past dueAt, or no message/prompt)' }, '404': { description: 'Agent not found' } },
+      },
+      get: { tags: ['Reminders'], summary: 'List reminders (optionally by status)', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'status', in: 'query', required: false, schema: { type: 'string', enum: ['scheduled', 'firing', 'completed', 'error', 'cancelled'] } }, ...pageParams], responses: { '200': { description: 'Reminders', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Reminder' } } } } } } },
+    },
+    '/agents/{id}/reminders/{rid}': {
+      get: { tags: ['Reminders'], summary: 'Get one reminder', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'rid', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Reminder' }, '404': { description: 'Not found' } } },
+      delete: { tags: ['Reminders'], summary: 'Cancel a reminder', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'rid', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Cancelled' }, '404': { description: 'No cancellable reminder' } } },
+    },
+    '/agents/{id}/reminders/{rid}/deliveries': {
+      get: { tags: ['Reminders'], summary: 'Delivery audit trail for a reminder', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'rid', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, ...pageParams], responses: { '200': { description: 'Deliveries', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/ReminderDelivery' } } } } } } },
+    },
+
+    // --- OpenAI-compatible ---
+    '/v1/chat/completions': {
+      post: {
+        tags: ['OpenAI-compatible'],
+        summary: 'OpenAI-compatible chat completions',
+        description: 'model = agent id or name. Client system messages are ignored; history is client-owned. stream:true emits chat.completion.chunk frames ending in [DONE].',
+        security: [{ orgApiKey: [], endUserToken: [] }],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['model', 'messages'], properties: { model: { type: 'string' }, messages: { type: 'array' }, stream: { type: 'boolean' }, user: { type: 'string' }, max_tokens: { type: 'integer' }, max_completion_tokens: { type: 'integer' }, temperature: { type: 'number' }, stream_options: { type: 'object' } } } } } },
+        responses: {
+          '200': { description: 'chat.completion (or SSE stream)' },
+          '400': { description: 'Invalid request', content: { 'application/json': { schema: { $ref: '#/components/schemas/OpenAIError' } } } },
+          '404': { description: 'model_not_found', content: { 'application/json': { schema: { $ref: '#/components/schemas/OpenAIError' } } } },
+          '429': { description: 'Rate or quota exceeded' },
+        },
+      },
+    },
+    '/v1/models': {
+      get: { tags: ['OpenAI-compatible'], summary: "List the org's agents as OpenAI models", security: [{ orgApiKey: [] }], parameters: [...pageParams], responses: { '200': { description: 'Model list' } } },
+    },
   },
 } as const

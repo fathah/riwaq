@@ -1,10 +1,11 @@
 <p align="center">
 <img src="./assets/riwaq.webp" width="50%"/>
 </p>
-Multi-tenant AI agent infrastructure — **RAG + per-agent memory + question analytics**.
-One backend hosts many organizations, each with many independent agents. Every agent has
-its own private knowledge base and can optionally **share** knowledge bases with other
-agents in the same org.
+Multi-tenant AI agent infrastructure — **RAG + per-agent memory + question analytics +
+a per-org self-learning loop + scheduled reminders**. One backend hosts many
+organizations, each with many independent agents. Every agent has its own private
+knowledge base and can optionally **share** knowledge bases with other agents in the
+same org.
 
 Provider-agnostic on both sides:
 
@@ -31,19 +32,34 @@ message ─▶ embed ─▶ KB search (private + shared) + memory recall ─▶ 
 ```
 
 The async learning loop, after each response: extracts durable **memories**, clusters the
-question into a **topic** (powering "most asked"), and stores which chunks were used.
+question into a **topic** (powering "most asked"), records the retrieval quality (for
+gap detection), and — optionally — extracts **dated commitments** into reminders. None of
+it adds latency to the answer.
+
+Two features build on those signals:
+
+- **Self-learning** — thumbs-up answers cluster into **learned answers**; once enough
+  *distinct* end users endorse one (or an operator approves it) the Q&A is promoted into
+  the agent's knowledge base, so it answers better over time. A **learning report**
+  surfaces knowledge gaps ranked by how often they're asked. See [Self-learning](#self-learning).
+- **Reminders** — agents remember dates (renewals, deadlines) and fire a **signed webhook**
+  to your backend at due time; reminders can be created via API or auto-extracted from
+  chat. See [Reminders](#reminders).
 
 **Isolation by default, sharing by opt-in:**
 
-| Always isolated per agent                                    | Shareable within an org (opt-in) |
-| ------------------------------------------------------------ | -------------------------------- |
-| memory, conversations, messages, topics, analytics, feedback | knowledge bases                  |
+| Always isolated per agent                                                        | Shareable within an org (opt-in) |
+| -------------------------------------------------------------------------------- | -------------------------------- |
+| memory, conversations, messages, topics, analytics, feedback, learned answers, reminders | knowledge bases                  |
 
 Nothing ever crosses an organization boundary.
 
 ---
 
 ## Quick start
+
+The easiest local setup builds the API and starts PostgreSQL, DragonflyDB, and the API
+together:
 
 ```bash
 cp .env.example .env
@@ -60,9 +76,23 @@ pgvector `vector` extension), and is ready when you see `listening on ...`.
 curl localhost:3000/health      # {"ok":true}
 ```
 
-> The Postgres container publishes on host port **5433** (to avoid clashing with a local
-> Postgres on 5432). The API talks to the DB over the compose network, so this only
-> matters if you connect host tools to the database directly.
+For a production-style deployment using the published
+`ghcr.io/fathah/rewaq:latest` image:
+
+```bash
+cp .env.production.example .env.production
+# Replace every change-me value, then:
+docker compose --env-file .env.production -f docker-compose.prod.yml pull
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+curl http://localhost:3000/ready
+```
+
+See [Docker and deployment](DOCKER.md) for Docker-only commands, configuration,
+upgrades, logs, image tags, and GHCR publishing details.
+
+> In the local development stack, Postgres publishes on host port **5433** (to avoid
+> clashing with a local Postgres on 5432). The production stack does not publish its
+> database or cache ports.
 
 ---
 
@@ -260,6 +290,83 @@ Works out of the box with the `openai` SDKs, LangChain, OpenWebUI, LibreChat, an
 
 ---
 
+## Self-learning
+
+Each org's agents get better at answering their own users' questions over time — no model
+training, just a feedback flywheel over signals the pipeline already emits.
+
+- **Endorse** — an end-user thumbs-up feeds the learning loop. Equivalent questions
+  cluster into a single **learned answer** candidate that counts *distinct* endorsing
+  users (one vote per user, enforced in the DB — can't be inflated).
+- **Promote** — a candidate becomes knowledge two ways:
+  - **operator approval** (default), or
+  - **auto-promotion** once distinct endorsements reach the org's threshold.
+  Promotion writes the Q&A into the agent's KB as a `learned` document, so future
+  retrieval surfaces the vetted answer. Fully reversible (delete the document).
+- **Report** — knowledge gaps (questions the KB couldn't answer well) ranked by frequency,
+  plus answer coverage and the candidate pipeline.
+
+```bash
+# Set the auto-promote threshold (distinct users). 0 = operator approval only.
+curl -sX PUT $B/organizations/learning -H "authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -d '{"autoPromoteThreshold":3}'
+
+# Review pending candidates and approve one
+curl -s "$B/agents/$AGENT/learned-answers?status=pending" -H "authorization: Bearer $KEY"
+curl -sX POST $B/agents/$AGENT/learned-answers/<id>/approve -H "authorization: Bearer $KEY"
+
+# What should we teach this agent next?
+curl -s $B/agents/$AGENT/analytics/learning -H "authorization: Bearer $KEY"
+# → { coverage:{answered,unanswered,answerRate}, gaps:[{topic,count,avgSimilarity}], learned:{pending,approved,rejected} }
+```
+
+End-user feedback is untrusted, so a candidate only becomes knowledge via the
+distinct-user threshold or an operator — never a single actor.
+
+---
+
+## Reminders
+
+Agents remember dates (renewals, deadlines, follow-ups) and fire a **signed webhook** to
+your backend at due time, which your system turns into an email / SMS / push.
+
+```bash
+# 1. Configure the org webhook once — the signing secret is returned ONCE, store it
+curl -sX PUT $B/organizations/webhook -H "authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -d '{"url":"https://acme.example.com/riwaq-hook"}'
+# → { webhook: { url, secret } }   (verify X-Riwaq-Signature with this secret)
+
+# 2. Schedule a reminder — static message OR an agent-composed `prompt`
+curl -sX POST $B/agents/$AGENT/reminders -H "authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -d '{
+    "title":"Acme plan renewal",
+    "dueAt":"2027-03-03T09:00:00Z",
+    "recurrence":"yearly",
+    "prompt":"Write a friendly reminder that the Acme plan renews today.",
+    "endUserId":"u_123"
+  }'
+```
+
+- **Delivery** — an SSRF-guarded POST with `X-Riwaq-Signature: sha256=<hmac>` over
+  `timestamp.body`; every attempt is logged (`GET /agents/:id/reminders/:rid/deliveries`).
+- **Recurrence** — `daily | weekly | monthly | yearly` advances to the next occurrence;
+  one-offs complete. Failed deliveries retry with backoff, then flip to `error`.
+- **Auto-extraction** — when `REMINDER_AUTO_EXTRACT=1`, the learn loop detects dated
+  commitments in chat ("renews March 3") and creates reminders (`source:"auto"`), guarded
+  by future-date-only, a horizon cap, a per-user cap, and de-duplication.
+- **Scheduler** — a DB poller (multi-node safe via `FOR UPDATE SKIP LOCKED`) that runs on
+  every replica; no Redis required.
+
+Webhook payload:
+
+```json
+{ "type":"reminder", "reminderId":"…", "agentId":"…", "endUserId":"u_123",
+  "title":"Acme plan renewal", "message":"…", "dueAt":"…", "firedAt":"…",
+  "recurrence":"yearly", "source":"api", "occurrence":1 }
+```
+
+---
+
 ## Endpoints
 
 | Method | Path                                      | Notes                                                                             |
@@ -268,6 +375,8 @@ Works out of the box with the `openai` SDKs, LangChain, OpenWebUI, LibreChat, an
 | GET    | `/organizations/me`                       | current org + LLM config (key masked)                                             |
 | GET    | `/organizations/usage`                    | persistent token/spend usage + live storage counts and ceilings                   |
 | PUT    | `/organizations/llm`                      | set org LLM config `{ provider?, baseUrl?, apiKey?, model? }` (null clears)       |
+| PUT    | `/organizations/learning`                 | set self-learning auto-promote threshold `{ autoPromoteThreshold }`               |
+| PUT    | `/organizations/webhook`                  | set reminder webhook `{ url, secret? }`; returns signing secret once (null clears) |
 | POST   | `/agents`                                 | `{ name, systemPrompt?, provider?, model? }`; auto-creates the agent's private KB |
 | GET    | `/agents/:id`                             | agent + linked KBs                                                                |
 | POST   | `/knowledge-bases`                        | create a shared KB                                                                |
@@ -280,8 +389,17 @@ Works out of the box with the `openai` SDKs, LangChain, OpenWebUI, LibreChat, an
 | GET    | `/knowledge-bases/:kbId/documents`        | list documents (with status)                                                      |
 | DELETE | `/knowledge-bases/:kbId/documents/:docId` | delete (cascades to chunks)                                                       |
 | POST   | `/agents/:id/chat`                        | `{ endUserId, message, conversationId? }`; `?stream=1` SSE; `?format=openai`      |
-| POST   | `/messages/:id/feedback`                  | `{ rating: "up" \| "down" }`                                                      |
+| POST   | `/messages/:id/feedback`                  | `{ rating: "up" \| "down" }`; `up` feeds self-learning                            |
 | GET    | `/agents/:id/analytics/top-questions`     | most-asked topics                                                                 |
+| GET    | `/agents/:id/analytics/learning`          | knowledge gaps, answer coverage, learned-answer pipeline                          |
+| GET    | `/agents/:id/learned-answers`             | learned-answer candidates (`?status=pending\|approved\|rejected`)                 |
+| POST   | `/agents/:id/learned-answers/:laId/approve` | operator approval → promote into the KB                                         |
+| POST   | `/agents/:id/learned-answers/:laId/reject` | operator rejection                                                              |
+| POST   | `/agents/:id/reminders`                   | schedule a reminder `{ title, dueAt, message?\|prompt?, recurrence?, endUserId? }` |
+| GET    | `/agents/:id/reminders`                   | list reminders (`?status=`)                                                        |
+| GET    | `/agents/:id/reminders/:rid`              | get one reminder                                                                  |
+| DELETE | `/agents/:id/reminders/:rid`              | cancel a reminder                                                                 |
+| GET    | `/agents/:id/reminders/:rid/deliveries`   | webhook delivery audit trail                                                      |
 | POST   | `/v1/chat/completions`                    | OpenAI-compatible; `model` = agent id/name; `stream` supported                    |
 | GET    | `/v1/models`                              | the org's agents, as OpenAI models                                                |
 | GET    | `/health`                                 | DB ping                                                                           |
@@ -309,21 +427,26 @@ organization (tenant boundary, scoped by API key)
 - **Memory** is per-agent (optionally per end-user): durable facts stored as text +
   embedding, recalled by relevance and injected into the prompt.
 - **Topics** form automatically — each question is embedded and assigned to the nearest
-  topic centroid, or seeds a new cluster. Counts + recency give "most asked" with no
-  manual tagging.
-- The **async learning loop** runs after the response is sent, so it never adds latency.
+  topic centroid (whose centroid then shifts toward it via a running mean), or seeds a new
+  cluster. Counts + recency give "most asked" with no manual tagging.
+- **Self-learning** turns endorsed answers into promoted KB knowledge and surfaces gaps;
+  **reminders** fire signed webhooks at due time (see the sections above).
+- The **async learning loop** (memory, topics, gap signal, reminder extraction) runs after
+  the response is sent, so it never adds latency to the answer.
+- **Retrieval** orders by cosine distance so the HNSW index is used, raises `ef_search`
+  for the per-tenant filter, drops sub-threshold chunks, and packs under a char budget.
 
 ### Project layout
 
 ```
 src/
-├── index.ts            # Hono bootstrap, runs migrations, mounts routes
+├── index.ts            # Hono bootstrap: migrations, route mounting, workers + reminder scheduler
 ├── env.ts              # zod-validated environment
-├── db/                 # schema, SQL migration (vector ext), client, ownership guards
-├── lib/                # embeddings (Voyage), llm (Claude), chunk, parse
-├── middleware/auth.ts  # API key → orgId
-├── services/           # chat (shared pipeline), ingest, retrieve, memory, topics, learn
-├── routes/             # organizations, agents, knowledge-bases, documents, chat, openai, feedback, analytics
+├── db/                 # schema, SQL migrations (vector ext), client, ownership guards
+├── lib/                # embeddings, llm, chunk, parse, url-guard, guarded-fetch, webhook, crypto, queue, uuid, pagination
+├── middleware/         # auth (API key → orgId), operations (request ids, metrics)
+├── services/           # chat pipeline, ingest, retrieve, memory, topics, learn, learning, reminders, usage
+├── routes/             # organizations, agents, knowledge-bases, documents, chat, openai, feedback, analytics, learning, reminders
 └── prompts/            # system prompt + grounding rule, memory extraction, topic labels
 ```
 
@@ -361,7 +484,15 @@ endpoint, **or** a local offline model (transformers.js) — no key required.
 | `ORG_MAX_ESTIMATED_COST_MICROS` | no            | persistent estimated-spend ceiling                                     |
 | `ORG_MAX_DOCUMENTS`    | no                     | live per-org document ceiling                                           |
 | `ORG_MAX_STORED_CHARS` | no                     | live chunk-content storage ceiling                                      |
+| `RETRIEVAL_MIN_SIMILARITY` | no                 | drop chunks below this cosine similarity (default 0.2)                  |
+| `CHUNK_MAX_CHARS` / `CHUNK_OVERLAP_CHARS` | no      | chunk sizing; defaults fit the local embedder (1000 / 150)             |
+| `REMINDER_SCHEDULER_ENABLED` | no               | run the reminder poller on this node (default on)                       |
+| `REMINDER_AUTO_EXTRACT` | no                    | extract reminders from chat via one LLM call/turn (default on)          |
+| `DB_STATEMENT_TIMEOUT_MS` | no                  | server-side query timeout; 0 disables (default 30000)                   |
 | `PORT`                 | no                     | HTTP port (default 3000)                                                |
+
+See [.env.example](.env.example) for the full set (retrieval, self-learning, and
+reminder tuning knobs included).
 
 ## Development
 
@@ -375,9 +506,11 @@ npm run migrate    # apply migrations standalone
 ## Status & roadmap
 
 Working: tenancy + org auth, agents with auto private KB, shared KBs, ingestion
-(pdf/txt/md), retrieval, per-agent LLM provider (Anthropic or any OpenAI-compatible
-endpoint), native + inbound-OpenAI-compatible chat (with streaming), per-agent memory,
-topic analytics, feedback.
+(pdf/txt/md), HNSW-indexed retrieval, per-agent LLM provider (Anthropic or any
+OpenAI-compatible endpoint), native + inbound-OpenAI-compatible chat (with streaming),
+per-agent memory, topic analytics, feedback, **per-org self-learning** (endorse → promote
+→ gap report), and **scheduled reminders** (signed webhooks, recurrence, chat
+auto-extraction).
 
 Production controls now include signed end-user identity, encrypted tenant credentials,
 explicit provider allowlists, admin-gated provisioning, per-org rate/concurrency limits,

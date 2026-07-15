@@ -134,23 +134,28 @@ riwaq/
     │   ├── chunk.ts            # text → chunks (~500-1000 tok, ~100 overlap)
     │   └── parse.ts            # file → text (pdf/txt/md)
     ├── routes/
-    │   ├── organizations.ts
+    │   ├── organizations.ts    # + /organizations/learning (threshold), /organizations/webhook
     │   ├── agents.ts
     │   ├── knowledge-bases.ts  # create/list KBs; attach/detach to agents
     │   ├── documents.ts        # upload into a KB
     │   ├── chat.ts             # native POST /agents/:id/chat
     │   ├── openai.ts           # OpenAI-compatible /v1/chat/completions + /v1/models
-    │   ├── feedback.ts
-    │   └── analytics.ts
+    │   ├── feedback.ts         # up-vote feeds self-learning
+    │   ├── analytics.ts        # top-questions + learning report
+    │   ├── learning.ts         # learned-answer candidates: list / approve / reject
+    │   └── reminders.ts        # schedule / list / cancel / deliveries
     ├── serializers.ts          # canonical ChatResult → native | openai (+ stream frames)
     ├── services/
-    │   ├── chat.ts             # prepareChatTurn / runChatTurn / streamChatTurn (canonical)
+    │   ├── chat.ts             # prepare / run / stream (canonical, prepared-turn split)
     │   ├── llm-config.ts       # resolve agent → org → .env LLM config
     │   ├── ingest.ts           # parse → chunk → embed → store (into a KB)
-    │   ├── retrieve.ts         # resolve agent's KB set → top-k across them
+    │   ├── retrieve.ts         # resolve agent's KB set → HNSW top-k across them
     │   ├── memory.ts           # recall + extraction/upsert (per-agent)
-    │   ├── topics.ts           # classify → nearest centroid / new cluster
-    │   └── learn.ts            # async loop orchestration
+    │   ├── topics.ts           # classify → nearest centroid (running mean) / new cluster
+    │   ├── learn.ts            # async loop: memory + topics + gap signal + reminder extract
+    │   ├── learning.ts         # self-learning: endorse → cluster → promote → report
+    │   ├── reminders.ts        # CRUD + scheduler tick (claim/fire/deliver) + auto-extract
+    │   └── usage.ts            # persistent token/spend/storage governance
     └── prompts/
         ├── system.ts
         └── memory-extract.ts
@@ -333,8 +338,10 @@ Btree on all FKs and on `agent_knowledge_bases(agent_id)`. Migration must
 - **Question trends (per-agent):** every user message is embedded and assigned to a
   topic cluster; new clusters auto-form. Counts + recency power **top-questions** with
   zero manual tagging.
-- **Feedback:** thumbs-down answers + questions that retrieved weak chunks surface KB
-  gaps; optionally promote highly-rated Q&A pairs back into a KB later.
+- **Feedback → self-learning (implemented):** thumbs-down answers + questions that
+  retrieved weak chunks surface KB gaps (the **learning report**); thumbs-up answers are
+  clustered and, once enough distinct users endorse one (or an operator approves), the
+  Q&A is **promoted back into the agent's KB**. See section 13.
 
 ---
 
@@ -381,13 +388,19 @@ Ship M0–M4 as the usable core; M5–M7 are the "learning" layer.
   work may add OIDC/JWKS as an alternative to the current shared HMAC trust boundary.
 - **Shared memory across agents** — out of scope; memory is per-agent by design.
 - KB-level access control (read-only vs writable shared KBs).
-- Persistent storage, token, and monetary budgets (rate and concurrency limits exist).
 - Queue dashboards, load/failure drills, and separate worker deployment at larger scale.
 - Connection-pinned SSRF enforcement and infrastructure egress policy. Production
-  currently requires an explicit hostname allowlist and blocks private DNS answers.
-- Full OpenAPI schema/SDK compatibility suite, tracing, SLO dashboards, and alerting.
-- Re-ranking retrieved chunks (cross-encoder) for quality.
+  requires an explicit hostname allowlist, blocks private DNS answers, and the outbound
+  fetch refuses redirects; socket-level IP pinning is the remaining hardening.
+- Tracing, SLO dashboards, and alerting.
+- Re-ranking retrieved chunks (cross-encoder) and hybrid (BM25 + vector) retrieval.
 - Conversation summarization to bound short-term history token cost.
+- Durable (queue-backed) capture of up-vote endorsements and reminder auto-extraction;
+  both currently run best-effort in-process alongside the async learn loop.
+
+_Done since first draft:_ persistent token/spend/storage governance; retrieval now uses
+the HNSW index with a relevance floor and char budget; topic centroids move (running
+mean); promotion of endorsed Q&A back into a KB (self-learning); scheduled reminders.
 
 ---
 
@@ -405,3 +418,43 @@ The live checklist is [TODO.md](TODO.md). Work proceeds in this order:
 5. **External deployment proof:** enforce network egress outside the process and attach
    dated drill evidence. This final item cannot be truthfully satisfied by source code
    alone.
+
+---
+
+## 13. Self-learning (per org)
+
+A feedback flywheel over signals the pipeline already emits — no model training.
+
+- **Signals.** Each turn records `messages.feedback` (up/down), `messages.used_chunk_ids`,
+  the topic cluster, and `question_logs.top_similarity` (best retrieval score → gap signal).
+- **Endorse → cluster.** A thumbs-up feeds `captureUpvote`: the question is embedded and
+  matched (≥ `LEARNED_DEDUP_SIMILARITY`) to an existing **learned-answer** candidate under a
+  per-agent advisory lock, else a new candidate is created. `learned_answer_votes` has a
+  composite PK `(candidate, end_user)` so a single user can't inflate `distinct_user_count`.
+- **Promote.** Operator approval (default) or auto-promotion once `distinct_user_count`
+  reaches the org's `learned_auto_promote_threshold`. Promotion writes the Q&A into the
+  agent's private KB as a `source='learned'` document → chunked → embedded → retrievable.
+- **Report.** `GET /agents/:id/analytics/learning` — knowledge gaps ranked by frequency
+  (`top_similarity < LEARNING_GAP_SIMILARITY`), answer coverage, candidate pipeline counts.
+- **Safety.** End-user feedback is untrusted; a candidate only becomes knowledge via the
+  distinct-user threshold or an operator. Everything is org/agent-scoped.
+
+Tables: `learned_answers`, `learned_answer_votes`; `organizations.learned_auto_promote_threshold`;
+`question_logs.top_similarity` (migration `0011`).
+
+## 14. Reminders
+
+Agents remember dates (renewals, deadlines) and fire a **signed webhook** at due time.
+
+- **Model.** `reminders` (agent/org/end-user, `message` or `prompt`, `due_at`, `recurrence`,
+  `status`, `source`, `next_fire_at`, attempt/fire counts) + `reminder_deliveries` audit;
+  `organizations.webhook_url` + encrypted `webhook_secret` (migration `0012`).
+- **Scheduler.** A DB poller claims due rows with `FOR UPDATE SKIP LOCKED` (multi-node
+  safe, no Redis needed), started at boot and stopped on shutdown.
+- **Fire.** Compose the body (static `message`, or the agent's LLM from `prompt`), POST it
+  HMAC-signed (`X-Riwaq-Signature` over `timestamp.body`) through the SSRF-guarded fetch
+  (private IPs blocked, redirects refused, timeout), and log the delivery. Recurring
+  reminders advance; one-offs complete; failures back off then flip to `error`.
+- **Creation.** Explicit API (`POST /agents/:id/reminders`) or, when `REMINDER_AUTO_EXTRACT`
+  is on, auto-extracted from chat by the learn loop with guardrails (future-only, horizon
+  cap, per-user cap, dedupe).

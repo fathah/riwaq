@@ -1,8 +1,8 @@
-# Production stack. Run with:
-#   docker compose -f docker-compose.prod.yml up --build
+# Production stack using the image published from the release branch. Run with:
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d
 # Required env (via a .env file or the shell): POSTGRES_PASSWORD, SECRET_ENCRYPTION_KEY,
-# END_USER_SIGNING_SECRET, ADMIN_TOKEN, LLM_ALLOWED_HOSTS, and at least one LLM key. The database and cache are NOT published to
-# the host — only the API is reachable.
+# END_USER_SIGNING_SECRET, ADMIN_TOKEN, LLM_ALLOWED_HOSTS, and an LLM key unless keys
+# are configured per organization. The database and cache are NOT published to the host.
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -29,7 +29,7 @@ services:
     restart: unless-stopped
 
   api:
-    build: .
+    image: ${RIWAQ_IMAGE:-ghcr.io/fathah/rewaq:latest}
     depends_on:
       db:
         condition: service_healthy
