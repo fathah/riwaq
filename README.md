@@ -1,7 +1,8 @@
 <p align="center">
 <img src="./assets/riwaq.webp" width="50%"/>
 </p>
-Multi-tenant AI agent infrastructure — **RAG + per-agent memory + question analytics +
+
+Multi-tenant AI agent infrastructure. **RAG + per-agent memory + question analytics +
 a per-org self-learning loop + scheduled reminders**. One backend hosts many
 organizations, each with many independent agents. Every agent has its own private
 knowledge base and can optionally **share** knowledge bases with other agents in the
@@ -16,7 +17,7 @@ Provider-agnostic on both sides:
   is identical no matter which provider backs the agent, and stays stable as new
   backends/formats are added.
 
-Docker-first, API-first. The full design lives in [plan.md](plan.md).
+Docker-first, API-first.
 
 ---
 
