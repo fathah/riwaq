@@ -36,11 +36,23 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: Install dashboard dependencies
+        working-directory: web
+        run: npm ci
       - name: Typecheck
+        run: npm run typecheck
+      - name: Typecheck dashboard
+        working-directory: web
         run: npm run typecheck
       - name: Test (isolation matrix + unit)
         run: npm test
+      - name: Build dashboard
+        working-directory: web
+        run: npm run build
       - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+      - name: Dashboard production dependency audit
+        working-directory: web
         run: npm audit --omit=dev --audit-level=high
       - name: Validate production Compose
         env:
@@ -53,3 +65,5 @@ jobs:
         run: docker compose -f docker-compose.prod.yml config --quiet
       - name: Build production image
         run: docker build -t riwaq:ci .
+      - name: Build dashboard image
+        run: docker build -t riwaq-web:ci ./web

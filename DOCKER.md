@@ -1,17 +1,18 @@
 # Docker and deployment
 
-Riwaq needs three services in production:
+Riwaq's API needs three services in production, plus the optional web console:
 
 - the Riwaq API;
 - PostgreSQL 16 with pgvector;
 - Redis or DragonflyDB for durable jobs, shared limits, and caching.
+- the Next.js management console.
 
 The repository provides two Compose files:
 
-| File | Purpose | API source |
+| File | Purpose | Application source |
 | --- | --- | --- |
 | `docker-compose.yml` | local development with source live reload | builds this checkout |
-| `docker-compose.prod.yml` | production-style deployment | pulls `ghcr.io/fathah/rewaq` |
+| `docker-compose.prod.yml` | production-style deployment | pulls the API and web images from GHCR |
 
 ## Requirements
 
@@ -36,6 +37,7 @@ docker compose up --build
 The services are available at:
 
 - API: `http://localhost:3000`
+- dashboard: `http://localhost:3001`
 - PostgreSQL from the host: `localhost:5433`
 - DragonflyDB from the host: `localhost:6379`
 
@@ -44,6 +46,14 @@ Migrations run automatically when the API starts. Check it with:
 ```bash
 curl http://localhost:3000/health
 curl http://localhost:3000/ready
+```
+
+The dashboard starts in setup mode until `RIWAQ_API_KEY` and
+`RIWAQ_DASHBOARD_TOKEN` are set in `.env`. Follow the instructions at
+`http://localhost:3001`, then recreate only the web service:
+
+```bash
+docker compose up -d --force-recreate web
 ```
 
 Stop the stack without deleting data:
@@ -67,6 +77,7 @@ cp .env.production.example .env.production
 openssl rand -base64 32  # use for SECRET_ENCRYPTION_KEY
 openssl rand -base64 32  # use a different value for END_USER_SIGNING_SECRET
 openssl rand -hex 32     # use for ADMIN_TOKEN
+openssl rand -hex 32     # use a different value for RIWAQ_DASHBOARD_TOKEN
 ```
 
 Replace every `change-me` value in `.env.production`. Keep this file secret; it is
@@ -82,24 +93,33 @@ docker compose --env-file .env.production -f docker-compose.prod.yml ps
 curl http://localhost:3000/ready
 ```
 
-Only the API port is published. PostgreSQL and DragonflyDB remain on the private Compose
-network. Their data is stored in named volumes.
+The API and dashboard ports are published. PostgreSQL and DragonflyDB remain on the
+private Compose network. Their data is stored in named volumes. The dashboard keeps
+`RIWAQ_API_KEY` on its server and protects the UI with `RIWAQ_DASHBOARD_TOKEN`.
+
+On the first boot, visit `http://localhost:3001`. If there is no organization API key
+yet, create an organization as shown on the setup page, add the returned one-time key
+to `.env.production`, and recreate the web container:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --force-recreate web
+```
 
 View logs:
 
 ```bash
-docker compose --env-file .env.production -f docker-compose.prod.yml logs -f api
+docker compose --env-file .env.production -f docker-compose.prod.yml logs -f api web
 ```
 
 Upgrade to the newest release image:
 
 ```bash
-docker compose --env-file .env.production -f docker-compose.prod.yml pull api
+docker compose --env-file .env.production -f docker-compose.prod.yml pull api web
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d
 ```
 
-For a repeatable deployment, set `RIWAQ_IMAGE` in `.env.production` to an immutable tag,
-for example `ghcr.io/fathah/rewaq:release-abc1234`, instead of `latest`.
+For a repeatable deployment, set both `RIWAQ_IMAGE` and `RIWAQ_WEB_IMAGE` in
+`.env.production` to matching immutable `release-<sha>` tags instead of `latest`.
 
 ## Run only the API image with Docker
 
@@ -124,34 +144,40 @@ the same container. Use the managed service hostname or a Docker network service
 
 ```bash
 docker build -t rewaq:local .
+docker build -t rewaq-web:local ./web
 ```
 
-The image runs as the non-root `riwaq` user and listens on port 3000. It runs database
-migrations before accepting traffic.
+Both images run as non-root users. The API listens on port 3000 and runs database
+migrations before accepting traffic; the dashboard listens on port 3001.
 
 ## GitHub Container Registry publishing
 
 `.github/workflows/docker-publish.yml` runs on every push to the `release` branch. It
-builds Linux AMD64 and ARM64 images and publishes:
+builds Linux AMD64 and ARM64 API and dashboard images. Each image receives `latest`,
+`release`, and `release-<short-commit-sha>` tags:
 
 - `ghcr.io/fathah/rewaq:latest`
 - `ghcr.io/fathah/rewaq:release`
 - `ghcr.io/fathah/rewaq:release-<short-commit-sha>`
+- `ghcr.io/fathah/rewaq-web:latest`
+- `ghcr.io/fathah/rewaq-web:release`
+- `ghcr.io/fathah/rewaq-web:release-<short-commit-sha>`
 
 The workflow authenticates with GitHub's built-in `GITHUB_TOKEN`; no registry password
 secret is required. The workflow grants only `contents: read` and `packages: write`.
 
-After the first publish, open the `rewaq` package settings on GitHub and set its
-visibility to **Public** if anonymous `docker pull` access is required. For a private
-package, authenticate first with a classic personal access token that has `read:packages`:
+After the first publish, open both package settings on GitHub and set their visibility
+to **Public** if anonymous `docker pull` access is required. For private packages,
+authenticate first with a classic personal access token that has `read:packages`:
 
 ```bash
 echo "$GHCR_TOKEN" | docker login ghcr.io -u fathah --password-stdin
 docker pull ghcr.io/fathah/rewaq:latest
+docker pull ghcr.io/fathah/rewaq-web:latest
 ```
 
 To publish a release, merge or push the desired commit to `release`, then verify the
-`Publish Docker image` workflow in the repository's Actions page.
+`Publish Docker images` workflow in the repository's Actions page.
 
 ## Useful checks
 
@@ -162,6 +188,6 @@ docker compose --env-file .env.production -f docker-compose.prod.yml config --qu
 # Show running service health.
 docker compose --env-file .env.production -f docker-compose.prod.yml ps
 
-# Inspect API logs.
-docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=100 api
+# Inspect application logs.
+docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=100 api web
 ```

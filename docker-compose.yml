@@ -53,6 +53,20 @@ services:
     volumes:
       - ./src:/app/src
 
+  web:
+    build:
+      context: ./web
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      RIWAQ_API_URL: http://api:3000
+      RIWAQ_PUBLIC_API_URL: ${RIWAQ_PUBLIC_API_URL:-http://localhost:3000}
+      RIWAQ_API_KEY: ${RIWAQ_API_KEY:-}
+      RIWAQ_DASHBOARD_TOKEN: ${RIWAQ_DASHBOARD_TOKEN:-}
+    ports:
+      - "${WEB_PORT:-3001}:3001"
+
 volumes:
   pgdata:
   dragonflydata:

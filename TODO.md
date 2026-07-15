@@ -32,6 +32,7 @@ automated tests, production configuration, and operator documentation agree.
 - [ ] Traces, dashboards, alert rules, and measurable SLOs
 - [x] Backup/restore and credential-rotation runbooks
 - [x] CI release gate: typecheck, tests, audit, Compose validation, image build
+- [x] Protected Next.js management console with first-run environment setup
 
 ## A+ exit criteria
 

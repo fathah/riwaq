@@ -63,6 +63,27 @@ services:
     # Runs the image's default CMD (non-root, prod deps) — no source mount, no watch.
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+    restart: unless-stopped
+
+  web:
+    image: ${RIWAQ_WEB_IMAGE:-ghcr.io/fathah/rewaq-web:latest}
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      RIWAQ_API_URL: http://api:3000
+      RIWAQ_PUBLIC_API_URL: ${RIWAQ_PUBLIC_API_URL:-http://localhost:3000}
+      RIWAQ_API_KEY: ${RIWAQ_API_KEY:-}
+      RIWAQ_DASHBOARD_TOKEN: ${RIWAQ_DASHBOARD_TOKEN:-}
+    ports:
+      - "${WEB_PORT:-3001}:3001"
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
 volumes:

@@ -256,6 +256,13 @@ export const openApiDocument = {
 
     // --- Agents ---
     '/agents': {
+      get: {
+        tags: ['Agents'],
+        summary: "List the org's agents (paginated)",
+        security: [{ orgApiKey: [] }],
+        parameters: [...pageParams],
+        responses: { '200': { description: 'Agents' } },
+      },
       post: {
         tags: ['Agents'],
         summary: 'Create an agent (auto-creates its private KB)',

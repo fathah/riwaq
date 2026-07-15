@@ -70,3 +70,11 @@ describe('OpenAI-compatible error envelopes', () => {
     expect(res.json.error.code).toBe('model_not_found')
   })
 })
+
+describe('first-party agent listing', () => {
+  it('lists only agents owned by the authenticated organization', async () => {
+    const res = await api('GET', '/agents', key)
+    expect(res.status).toBe(200)
+    expect(res.json).toEqual(expect.arrayContaining([expect.objectContaining({ id: agentId, name: 'r' })]))
+  })
+})

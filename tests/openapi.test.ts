@@ -15,6 +15,7 @@ describe('OpenAPI contract', () => {
 
     // Chat surfaces (native + OpenAI-compatible).
     expect(spec.paths['/agents/{id}/chat']).toBeDefined()
+    expect(spec.paths['/agents']).toMatchObject({ get: expect.any(Object), post: expect.any(Object) })
     expect(spec.paths['/v1/chat/completions']).toBeDefined()
 
     // Self-learning + reminders must be documented.

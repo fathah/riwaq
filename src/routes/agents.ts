@@ -1,12 +1,13 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { eq } from 'drizzle-orm'
+import { desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agents, agentKnowledgeBases, knowledgeBases } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg } from '../db/guards'
 import { resolveLlmConfig } from '../services/llm-config'
 import type { AppEnv } from '../types'
+import { pageParams } from '../lib/pagination'
 
 export const agentsRoute = new Hono<AppEnv>()
 agentsRoute.use('*', orgAuth)
@@ -16,6 +17,20 @@ const createSchema = z.object({
   systemPrompt: z.string().max(20_000).optional(),
   provider: z.enum(['anthropic', 'openai']).optional(),
   model: z.string().max(200).optional(),
+})
+
+// List the current organization's agents for first-party management surfaces.
+agentsRoute.get('/agents', async (c) => {
+  const orgId = c.get('orgId')
+  const { limit, offset } = pageParams((name) => c.req.query(name))
+  const rows = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.orgId, orgId))
+    .orderBy(desc(agents.createdAt))
+    .limit(limit)
+    .offset(offset)
+  return c.json(rows)
 })
 
 // Create an agent + its private (default) KB + the link, atomically.

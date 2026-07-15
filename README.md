@@ -77,6 +77,11 @@ pgvector `vector` extension), and is ready when you see `listening on ...`.
 curl localhost:3000/health      # {"ok":true}
 ```
 
+The optional Next.js management console is available at `http://localhost:3001`.
+On first boot it shows the missing server-side environment values and walks you
+through creating an organization, setting `RIWAQ_API_KEY`, and protecting the
+console with `RIWAQ_DASHBOARD_TOKEN`.
+
 For a production-style deployment using the published
 `ghcr.io/fathah/rewaq:latest` image:
 
@@ -94,6 +99,31 @@ upgrades, logs, image tags, and GHCR publishing details.
 > In the local development stack, Postgres publishes on host port **5433** (to avoid
 > clashing with a local Postgres on 5432). The production stack does not publish its
 > database or cache ports.
+
+## Web dashboard
+
+The dashboard in [`web/`](web/) is a separate Next.js App Router application. It
+keeps the organization API key on the server and protects management actions with
+an HTTP-only signed session.
+
+It currently provides:
+
+- API readiness, organization usage, token quota, and storage summaries;
+- agent listing and agent creation;
+- private and shared knowledge-base visibility and shared-KB creation;
+- organization-level LLM provider, model, endpoint, and key configuration.
+
+For local development outside Docker:
+
+```bash
+cd web
+cp .env.example .env.local
+npm install
+npm run dev
+```
+
+If the environment values are missing or invalid, the console stays in setup mode
+and does not expose management actions.
 
 ---
 
@@ -379,6 +409,7 @@ Webhook payload:
 | PUT    | `/organizations/learning`                 | set self-learning auto-promote threshold `{ autoPromoteThreshold }`               |
 | PUT    | `/organizations/webhook`                  | set reminder webhook `{ url, secret? }`; returns signing secret once (null clears) |
 | POST   | `/agents`                                 | `{ name, systemPrompt?, provider?, model? }`; auto-creates the agent's private KB |
+| GET    | `/agents`                                 | list the organization's agents (paginated)                                       |
 | GET    | `/agents/:id`                             | agent + linked KBs                                                                |
 | POST   | `/knowledge-bases`                        | create a shared KB                                                                |
 | GET    | `/knowledge-bases`                        | list the org's KBs                                                                |

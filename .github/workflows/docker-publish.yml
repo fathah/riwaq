@@ -1,4 +1,4 @@
-name: Publish Docker image
+name: Publish Docker images
 
 on:
   push:
@@ -13,7 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/fathah/rewaq
+  API_IMAGE_NAME: ghcr.io/fathah/rewaq
+  WEB_IMAGE_NAME: ghcr.io/fathah/rewaq-web
 
 jobs:
   publish:
@@ -36,24 +37,46 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image metadata
-        id: meta
+      - name: Generate API image metadata
+        id: api-meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ${{ env.API_IMAGE_NAME }}
           tags: |
             type=raw,value=latest
             type=raw,value=release
             type=sha,prefix=release-
 
-      - name: Build and publish image
+      - name: Build and publish API image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.api-meta.outputs.tags }}
+          labels: ${{ steps.api-meta.outputs.labels }}
+          cache-from: type=gha,scope=rewaq-api
+          cache-to: type=gha,mode=max,scope=rewaq-api
+
+      - name: Generate web image metadata
+        id: web-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.WEB_IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=release
+            type=sha,prefix=release-
+
+      - name: Build and publish web image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.web-meta.outputs.tags }}
+          labels: ${{ steps.web-meta.outputs.labels }}
+          cache-from: type=gha,scope=rewaq-web
+          cache-to: type=gha,mode=max,scope=rewaq-web
