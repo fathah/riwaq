@@ -108,10 +108,11 @@ an HTTP-only signed session.
 
 It currently provides:
 
+- route-based Overview, Agents, Knowledge, and Settings pages with persistent tabs;
 - API readiness, organization usage, token quota, and storage summaries;
-- agent listing and agent creation;
-- private and shared knowledge-base visibility and shared-KB creation;
-- organization-level LLM provider, model, endpoint, and key configuration.
+- modal workflows for agent and shared knowledge-base creation;
+- modal organization LLM provider, model, endpoint, and key configuration;
+- toast feedback after successful or failed management actions.
 
 For local development outside Docker:
 

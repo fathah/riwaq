@@ -69,15 +69,32 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload as T
 }
 
-export async function getDashboardData() {
-  const [ready, organization, usage, agents, knowledgeBases] = await Promise.all([
-    request<{ ready: boolean }>('/ready'),
-    request<Organization>('/organizations/me'),
-    request<UsageSnapshot>('/organizations/usage'),
-    request<Agent[]>('/agents?limit=200'),
-    request<KnowledgeBase[]>('/knowledge-bases?limit=200'),
-  ])
-  return { ready, organization, usage, agents, knowledgeBases }
+export async function getReady() {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await request<{ ready: boolean }>('/ready')
+    } catch (error) {
+      if (!(error instanceof RiwaqApiError) || error.status !== 503 || attempt === 2) throw error
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
+    }
+  }
+  throw new Error('Riwaq API is not ready')
+}
+
+export function getOrganization() {
+  return request<Organization>('/organizations/me')
+}
+
+export function getUsage() {
+  return request<UsageSnapshot>('/organizations/usage')
+}
+
+export function getAgents() {
+  return request<Agent[]>('/agents?limit=200')
+}
+
+export function getKnowledgeBases() {
+  return request<KnowledgeBase[]>('/knowledge-bases?limit=200')
 }
 
 export function createAgent(input: { name: string; systemPrompt?: string; provider?: string; model?: string }) {

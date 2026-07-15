@@ -13,14 +13,14 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : 'Request failed'
 }
 
-function finish(kind: 'notice' | 'error', message: string): never {
-  redirect(`/?${kind}=${encodeURIComponent(message)}`)
+function finish(path: string, kind: 'notice' | 'error', message: string): never {
+  redirect(`${path}?${kind}=${encodeURIComponent(message)}`)
 }
 
 export async function loginAction(formData: FormData): Promise<void> {
   const ok = await createDashboardSession(field(formData, 'token'))
-  if (!ok) finish('error', 'Invalid dashboard access token')
-  redirect('/')
+  if (!ok) finish('/', 'error', 'Invalid dashboard access token')
+  redirect('/overview')
 }
 
 export async function logoutAction(): Promise<void> {
@@ -31,7 +31,7 @@ export async function logoutAction(): Promise<void> {
 export async function createAgentAction(formData: FormData): Promise<void> {
   await requireDashboardSession()
   const name = field(formData, 'name')
-  if (!name) finish('error', 'Agent name is required')
+  if (!name) finish('/agents', 'error', 'Agent name is required')
   const systemPrompt = field(formData, 'systemPrompt')
   const provider = field(formData, 'provider')
   const model = field(formData, 'model')
@@ -44,23 +44,25 @@ export async function createAgentAction(formData: FormData): Promise<void> {
       ...(model ? { model } : {}),
     })
   } catch (error) {
-    finish('error', messageOf(error))
+    finish('/agents', 'error', messageOf(error))
   }
-  revalidatePath('/')
-  finish('notice', `Agent “${name}” created`)
+  revalidatePath('/agents')
+  revalidatePath('/overview')
+  finish('/agents', 'notice', `Agent “${name}” created`)
 }
 
 export async function createKnowledgeBaseAction(formData: FormData): Promise<void> {
   await requireDashboardSession()
   const name = field(formData, 'name')
-  if (!name) finish('error', 'Knowledge-base name is required')
+  if (!name) finish('/knowledge', 'error', 'Knowledge-base name is required')
   try {
     await createKnowledgeBase(name)
   } catch (error) {
-    finish('error', messageOf(error))
+    finish('/knowledge', 'error', messageOf(error))
   }
-  revalidatePath('/')
-  finish('notice', `Knowledge base “${name}” created`)
+  revalidatePath('/knowledge')
+  revalidatePath('/overview')
+  finish('/knowledge', 'notice', `Knowledge base “${name}” created`)
 }
 
 export async function updateLlmAction(formData: FormData): Promise<void> {
@@ -70,13 +72,13 @@ export async function updateLlmAction(formData: FormData): Promise<void> {
     const value = field(formData, name)
     if (value) input[name] = value
   }
-  if (Object.keys(input).length === 0) finish('error', 'Enter at least one LLM setting to update')
+  if (Object.keys(input).length === 0) finish('/settings', 'error', 'Enter at least one LLM setting to update')
 
   try {
     await updateOrganizationLlm(input)
   } catch (error) {
-    finish('error', messageOf(error))
+    finish('/settings', 'error', messageOf(error))
   }
-  revalidatePath('/')
-  finish('notice', 'Organization LLM settings updated')
+  revalidatePath('/settings')
+  finish('/settings', 'notice', 'Organization LLM settings updated')
 }

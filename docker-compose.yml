@@ -38,6 +38,9 @@ services:
       dragonfly:
         condition: service_started
     environment:
+      # The runtime image defaults to production. Override it for this
+      # live-reload development stack so production-only secrets are optional.
+      NODE_ENV: development
       DATABASE_URL: postgres://riwaq:riwaq@db:5432/riwaq
       REDIS_URL: redis://dragonfly:6379
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
