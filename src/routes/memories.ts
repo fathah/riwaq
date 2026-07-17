@@ -12,6 +12,7 @@ import {
   updateMemory,
 } from '../services/memory'
 import type { AppEnv } from '../types'
+import { ensureEndUser } from '../services/users'
 
 export const memoriesRoute = new Hono<AppEnv>()
 memoriesRoute.use('*', orgAuth)
@@ -36,6 +37,7 @@ memoriesRoute.post('/agents/:id/memories', async (c) => {
   if (!agent) return c.json({ error: 'agent not found' }, 404)
   const parsed = createSchema.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
+  if (parsed.data.endUserId) await ensureEndUser(agent.orgId, parsed.data.endUserId)
   const created = await createMemory({
     agentId: agent.id,
     endUserId: parsed.data.endUserId ?? null,

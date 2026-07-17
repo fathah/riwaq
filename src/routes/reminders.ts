@@ -12,6 +12,7 @@ import {
   listDeliveries,
 } from '../services/reminders'
 import type { AppEnv } from '../types'
+import { ensureEndUser } from '../services/users'
 
 export const remindersRoute = new Hono<AppEnv>()
 remindersRoute.use('*', orgAuth)
@@ -39,6 +40,7 @@ remindersRoute.post('/agents/:id/reminders', async (c) => {
 
   const dueAt = new Date(parsed.data.dueAt)
   if (dueAt.getTime() <= Date.now()) return c.json({ error: 'dueAt must be in the future' }, 400)
+  if (parsed.data.endUserId) await ensureEndUser(agent.orgId, parsed.data.endUserId)
 
   const row = await createReminder({
     orgId: agent.orgId,

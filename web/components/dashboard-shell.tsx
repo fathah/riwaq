@@ -14,6 +14,7 @@ import type { ManagedOrganization } from '../lib/riwaq'
 const navigation: { href: string; label: string; icon: IconName }[] = [
   { href: '/overview', label: 'Overview', icon: 'grid' },
   { href: '/agents', label: 'Agents', icon: 'bot' },
+  { href: '/users', label: 'Users', icon: 'users' },
   { href: '/playground', label: 'Playground', icon: 'playground' },
   { href: '/knowledge', label: 'Knowledge', icon: 'book' },
   { href: '/organizations', label: 'Organizations', icon: 'organization' },
@@ -36,7 +37,7 @@ export function DashboardShell({ organization, organizations, ready, apiUrl, chi
       <aside className="sidebar">
         <Link className="brand-lockup brand-link" href="/overview"><img alt="" aria-hidden="true" className="brand-mark brand-logo" height="38" src="/riwaq-icon.svg" width="38" /><div><strong>Riwaq</strong><span>Console</span></div></Link>
         <nav aria-label="Primary navigation">
-          {navigation.map((item) => <Link className={pathname === item.href ? 'nav-active' : ''} href={item.href} key={item.href}><Icon name={item.icon} />{item.label}</Link>)}
+          {navigation.map((item) => <Link className={pathname === item.href || pathname.startsWith(`${item.href}/`) ? 'nav-active' : ''} href={item.href} key={item.href}><Icon name={item.icon} />{item.label}</Link>)}
         </nav>
         <div className="sidebar-foot">
           <div className="api-state"><span className={ready ? 'status-dot' : 'status-dot status-dot-error'} /><div><strong>API {ready ? 'operational' : 'not ready'}</strong><small>{apiUrl}</small></div></div>

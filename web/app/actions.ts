@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { clearDashboardSession, createDashboardSession, requireDashboardSession, setSelectedOrganizationId } from '../lib/auth'
-import { connectTelegram, createAgent, createAgentMemory, createKnowledgeBase, createManagedOrganization, deleteAgentMemory, deleteKnowledgeDocument, disconnectAgentChannel, forgetAgentUser, getManagedOrganizations, renameManagedOrganization, updateAgentInstructions, updateAgentMemory, updateOrganizationLlm, uploadKnowledgeDocument } from '../lib/riwaq'
+import { connectTelegram, connectUser, createAgent, createAgentMemory, createKnowledgeBase, createManagedOrganization, deleteAgentMemory, deleteKnowledgeDocument, disconnectAgentChannel, disconnectUserIdentity, forgetAgentUser, getManagedOrganizations, renameManagedOrganization, updateAgentInstructions, updateAgentMemory, updateOrganizationLlm, updateUser, uploadKnowledgeDocument } from '../lib/riwaq'
 
 function field(formData: FormData, name: string): string {
   return String(formData.get(name) ?? '').trim()
@@ -73,13 +73,19 @@ function revalidateAgentMemory(agentId: string) {
   revalidatePath(`/agents/${encodeURIComponent(agentId)}`)
 }
 
+function memoryReturnPath(formData: FormData, fallback: string): string {
+  const value = field(formData, 'returnPath')
+  return value.startsWith('/agents/') || value.startsWith('/users/') ? value : fallback
+}
+
 export async function createAgentMemoryAction(formData: FormData): Promise<void> {
   await requireDashboardSession()
   const agentId = field(formData, 'agentId')
   const fact = field(formData, 'fact')
   const scope = field(formData, 'scope')
   const endUserId = field(formData, 'endUserId')
-  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  const fallback = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  const path = memoryReturnPath(formData, fallback)
   if (!agentId || !fact) finish(path, 'error', 'Agent and memory fact are required')
   if (scope === 'user' && !endUserId) finish(path, 'error', 'End-user identity is required for user-specific memory')
   try {
@@ -88,6 +94,7 @@ export async function createAgentMemoryAction(formData: FormData): Promise<void>
     finish(path, 'error', messageOf(error))
   }
   revalidateAgentMemory(agentId)
+  revalidatePath(path)
   finish(path, 'notice', 'Memory added')
 }
 
@@ -96,7 +103,8 @@ export async function updateAgentMemoryAction(formData: FormData): Promise<void>
   const agentId = field(formData, 'agentId')
   const memoryId = field(formData, 'memoryId')
   const fact = field(formData, 'fact')
-  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  const fallback = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  const path = memoryReturnPath(formData, fallback)
   if (!agentId || !memoryId || !fact) finish(path, 'error', 'Agent, memory, and fact are required')
   try {
     await updateAgentMemory(agentId, memoryId, fact)
@@ -104,6 +112,7 @@ export async function updateAgentMemoryAction(formData: FormData): Promise<void>
     finish(path, 'error', messageOf(error))
   }
   revalidateAgentMemory(agentId)
+  revalidatePath(path)
   finish(path, 'notice', 'Memory updated')
 }
 
@@ -111,7 +120,8 @@ export async function deleteAgentMemoryAction(formData: FormData): Promise<void>
   await requireDashboardSession()
   const agentId = field(formData, 'agentId')
   const memoryId = field(formData, 'memoryId')
-  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  const fallback = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  const path = memoryReturnPath(formData, fallback)
   if (!agentId || !memoryId) finish(path, 'error', 'Agent and memory are required')
   try {
     await deleteAgentMemory(agentId, memoryId)
@@ -119,7 +129,65 @@ export async function deleteAgentMemoryAction(formData: FormData): Promise<void>
     finish(path, 'error', messageOf(error))
   }
   revalidateAgentMemory(agentId)
+  revalidatePath(path)
   finish(path, 'notice', 'Memory deleted')
+}
+
+export async function connectUserAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const userId = field(formData, 'userId')
+  const displayName = field(formData, 'displayName')
+  const provider = field(formData, 'provider')
+  const namespace = field(formData, 'namespace')
+  const externalUserId = field(formData, 'externalUserId')
+  const existingUserId = field(formData, 'existingUserId')
+  const path = existingUserId ? `/users/${encodeURIComponent(existingUserId)}` : '/users'
+  if (!userId) finish(path, 'error', 'Canonical user ID is required')
+  if (Boolean(provider) !== Boolean(externalUserId)) finish(path, 'error', 'Provider and external user ID are required together')
+  try {
+    const result = await connectUser({
+      userId,
+      ...(displayName ? { displayName } : {}),
+      ...(provider ? { provider, externalUserId, namespace: namespace || 'default' } : {}),
+      mergeExisting: formData.get('mergeExisting') === 'on',
+    })
+    revalidatePath('/users')
+    revalidatePath(`/users/${encodeURIComponent(userId)}`)
+    finish(`/users/${encodeURIComponent(userId)}`, 'notice', result.mergedFrom ? `Identity linked; ${result.mergedFrom} was merged` : provider ? 'Identity linked' : 'User created')
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+}
+
+export async function updateUserAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const userId = field(formData, 'userId')
+  const path = userId ? `/users/${encodeURIComponent(userId)}` : '/users'
+  if (!userId) finish('/users', 'error', 'User is required')
+  try {
+    await updateUser(userId, field(formData, 'displayName') || null)
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+  revalidatePath('/users')
+  revalidatePath(path)
+  finish(path, 'notice', 'User updated')
+}
+
+export async function disconnectUserIdentityAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const userId = field(formData, 'userId')
+  const identityId = field(formData, 'identityId')
+  const path = userId ? `/users/${encodeURIComponent(userId)}` : '/users'
+  if (!userId || !identityId) finish(path, 'error', 'User identity is required')
+  try {
+    await disconnectUserIdentity(userId, identityId)
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+  revalidatePath('/users')
+  revalidatePath(path)
+  finish(path, 'notice', 'Platform identity disconnected')
 }
 
 export async function forgetAgentUserAction(formData: FormData): Promise<void> {

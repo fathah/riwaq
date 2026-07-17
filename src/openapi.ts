@@ -19,7 +19,7 @@ export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Riwaq API',
-    version: '1.4.0',
+    version: '1.5.0',
     description:
       'Multi-tenant AI agent infrastructure: RAG + per-agent memory + question analytics, ' +
       'a per-org self-learning loop, scheduled reminders with signed webhooks, and an ' +
@@ -30,6 +30,7 @@ export const openApiDocument = {
     { name: 'Organizations' },
     { name: 'Admin' },
     { name: 'Agents' },
+    { name: 'Users' },
     { name: 'Memory' },
     { name: 'Knowledge' },
     { name: 'Chat' },
@@ -136,6 +137,29 @@ export const openApiDocument = {
           endUserId: { type: ['string', 'null'], description: 'Null means agent-wide; otherwise isolated to this end-user identity.' },
           fact: { type: 'string', maxLength: 1000 },
           updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      EndUser: {
+        type: 'object',
+        required: ['id', 'displayName', 'identityCount', 'memoryCount', 'createdAt', 'updatedAt'],
+        properties: {
+          id: { type: 'string', description: 'Organization-owned canonical user ID.' },
+          displayName: { type: ['string', 'null'] },
+          identityCount: { type: 'integer' },
+          memoryCount: { type: 'integer' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      UserIdentity: {
+        type: 'object',
+        required: ['id', 'provider', 'namespace', 'externalUserId', 'createdAt'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          provider: { type: 'string', examples: ['telegram', 'whatsapp', 'shopify'] },
+          namespace: { type: 'string', description: 'Store, tenant, or account namespace; defaults to `default`.' },
+          externalUserId: { type: 'string' },
+          createdAt: { type: 'string', format: 'date-time' },
         },
       },
       LearningReport: {
@@ -380,6 +404,31 @@ export const openApiDocument = {
         parameters: [agentIdParam, { name: 'memoryId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
         responses: { '200': { description: 'Deleted' }, '404': { description: 'Memory not found' } },
       },
+    },
+
+    // --- Organization users + external identities ---
+    '/users': {
+      get: { tags: ['Users'], summary: 'List canonical organization users', security: [{ orgApiKey: [] }], parameters: [...pageParams], responses: { '200': { description: 'Users', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/EndUser' } } } } } } },
+    },
+    '/users/connect': {
+      post: {
+        tags: ['Users'],
+        summary: 'Idempotently create a user and connect an external platform identity',
+        description: 'Use the stable user ID from the business database. Set mergeExisting to migrate an auto-provisioned platform user and its durable state.',
+        security: [{ orgApiKey: [] }],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['userId'], properties: { userId: { type: 'string', minLength: 1, maxLength: 500 }, displayName: { type: ['string', 'null'], maxLength: 200 }, provider: { type: 'string', maxLength: 100 }, namespace: { type: 'string', maxLength: 200, default: 'default' }, externalUserId: { type: 'string', maxLength: 500 }, mergeExisting: { type: 'boolean', default: false } } } } } },
+        responses: { '200': { description: 'Connected' }, '400': { description: 'Invalid identity' }, '409': { description: 'Identity already belongs to another canonical user' } },
+      },
+    },
+    '/users/{userId}': {
+      get: { tags: ['Users'], summary: 'Get a user and connected identities', security: [{ orgApiKey: [] }], parameters: [{ name: 'userId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'User and identities' }, '404': { description: 'User not found' } } },
+      patch: { tags: ['Users'], summary: 'Update a user display name', security: [{ orgApiKey: [] }], parameters: [{ name: 'userId', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['displayName'], properties: { displayName: { type: ['string', 'null'], maxLength: 200 } } } } } }, responses: { '200': { description: 'Updated' }, '404': { description: 'User not found' } } },
+    },
+    '/users/{userId}/memories': {
+      get: { tags: ['Users', 'Memory'], summary: 'List this user’s memories across organization agents', security: [{ orgApiKey: [] }], parameters: [{ name: 'userId', in: 'path', required: true, schema: { type: 'string' } }, ...pageParams], responses: { '200': { description: 'User memories with agent names' }, '404': { description: 'User not found' } } },
+    },
+    '/users/{userId}/identities/{identityId}': {
+      delete: { tags: ['Users'], summary: 'Disconnect one external identity without deleting the canonical user', security: [{ orgApiKey: [] }], parameters: [{ name: 'userId', in: 'path', required: true, schema: { type: 'string' } }, { name: 'identityId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Disconnected' }, '404': { description: 'Identity not found' } } },
     },
 
     // --- Messaging channels ---

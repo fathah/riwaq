@@ -63,6 +63,31 @@ export type AgentMemory = {
   updatedAt: string
 }
 
+export type EndUser = {
+  id: string
+  displayName: string | null
+  identityCount: number
+  memoryCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export type UserIdentity = {
+  id: string
+  provider: string
+  namespace: string
+  externalUserId: string
+  createdAt: string
+}
+
+export type UserMemory = AgentMemory & {
+  agentId: string
+  agentName: string
+  endUserId: string
+}
+
+export type EndUserDetail = { user: EndUser; identities: UserIdentity[] }
+
 export type KnowledgeBase = {
   id: string
   name: string
@@ -228,6 +253,45 @@ export function getAgentChannels(agentId: string) {
 
 export function getAgentMemories(agentId: string) {
   return request<AgentMemory[]>(`/agents/${encodeURIComponent(agentId)}/memories?limit=200`)
+}
+
+export function getUsers() {
+  return request<EndUser[]>('/users?limit=200')
+}
+
+export function getUser(userId: string) {
+  return request<EndUserDetail>(`/users/${encodeURIComponent(userId)}`)
+}
+
+export function getUserMemories(userId: string) {
+  return request<UserMemory[]>(`/users/${encodeURIComponent(userId)}/memories?limit=200`)
+}
+
+export function connectUser(input: {
+  userId: string
+  displayName?: string
+  provider?: string
+  namespace?: string
+  externalUserId?: string
+  mergeExisting?: boolean
+}) {
+  return request<{ userId: string; identity: UserIdentity | null; mergedFrom: string | null }>('/users/connect', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function updateUser(userId: string, displayName: string | null) {
+  return request<EndUser>(`/users/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ displayName }),
+  })
+}
+
+export function disconnectUserIdentity(userId: string, identityId: string) {
+  return request<{ ok: true }>(`/users/${encodeURIComponent(userId)}/identities/${encodeURIComponent(identityId)}`, {
+    method: 'DELETE',
+  })
 }
 
 export function getKnowledgeBases() {

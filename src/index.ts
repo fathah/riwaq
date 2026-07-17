@@ -27,6 +27,7 @@ import { ChatError } from './services/chat'
 import { channelsRoute } from './routes/channels'
 import { startTelegramPolling, stopTelegramPolling } from './services/telegram-polling'
 import { memoriesRoute } from './routes/memories'
+import { usersRoute } from './routes/users'
 
 export const app = new Hono<AppEnv>()
 
@@ -90,6 +91,7 @@ app.route('/', learningRoute)
 app.route('/', remindersRoute)
 app.route('/', channelsRoute)
 app.route('/', memoriesRoute)
+app.route('/', usersRoute)
 
 // Map a thrown error to an HTTP status. ChatError carries its own; provider SDK
 // errors expose a numeric `status`; a Postgres UUID cast error is a client 400;

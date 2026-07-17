@@ -12,6 +12,7 @@ import {
   primaryKey,
   uniqueIndex,
   index,
+  foreignKey,
 } from 'drizzle-orm/pg-core'
 import { env } from '../env'
 
@@ -42,6 +43,43 @@ export const organizations = pgTable('organizations', {
   webhookSecretEncrypted: boolean('webhook_secret_encrypted').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
+
+// Organization-owned canonical users. `id` is deliberately supplied by the
+// business (customer UUID, CRM id, etc.) so existing user databases can connect
+// without maintaining a second opaque identifier.
+export const endUsers = pgTable(
+  'end_users',
+  {
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    id: text('id').notNull(),
+    displayName: text('display_name'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.id] })],
+)
+
+// Many platform identities can resolve to one canonical organization user.
+// Namespace distinguishes multiple stores/accounts using the same provider.
+export const endUserIdentities = pgTable(
+  'end_user_identities',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    endUserId: text('end_user_id').notNull(),
+    provider: text('provider').notNull(),
+    namespace: text('namespace').notNull().default('default'),
+    externalUserId: text('external_user_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ columns: [t.orgId, t.endUserId], foreignColumns: [endUsers.orgId, endUsers.id] }).onDelete('cascade'),
+    uniqueIndex('uq_end_user_platform_identity').on(t.orgId, t.provider, t.namespace, t.externalUserId),
+    index('idx_end_user_identities_user').on(t.orgId, t.endUserId),
+  ],
+)
 
 export const agents = pgTable('agents', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -181,6 +219,9 @@ export const channelSessions = pgTable(
     conversationId: uuid('conversation_id')
       .notNull()
       .references(() => conversations.id, { onDelete: 'cascade' }),
+    // Number of user turns assigned to the current conversation. Keeping this
+    // counter on the hot session row avoids a COUNT(messages) query per message.
+    turnCount: integer('turn_count').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

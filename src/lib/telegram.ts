@@ -18,6 +18,7 @@ export const telegramUpdateSchema = z.object({
       id: z.number().int(),
       is_bot: z.boolean().optional(),
       first_name: z.string().optional(),
+      last_name: z.string().optional(),
       username: z.string().optional(),
     }).optional(),
     chat: z.object({

@@ -57,9 +57,17 @@ from localhost, Docker, private networks, and hosts behind NAT without a public 
 TLS certificate, reverse proxy, or additional gateway service.
 
 Every Telegram message enters the canonical agent chat service, so answers and
-learning stay consistent with the Playground and HTTP API. End-user memory remains
-safe: Telegram users are scoped as `telegram:<user-id>`, and group participants do
-not share conversation history. `/new` starts a fresh conversation.
+learning stay consistent with the Playground and HTTP API. A new Telegram contact is
+auto-provisioned as `telegram:<user-id>`. It can later be linked to the business's
+canonical customer ID from **Users** (or `POST /users/connect`), migrating memories
+and reminders. Group participants do not share conversation history. `/new` starts a
+fresh conversation.
+
+Channel conversations also rotate automatically after **30 minutes of inactivity**
+or **20 user turns**, whichever comes first. These defaults are configurable with
+`CHANNEL_SESSION_IDLE_MINUTES` and `CHANNEL_SESSION_MAX_TURNS`. Rotation retains the
+old transcript for history/audit while starting clean short-term model context;
+canonical user memories and reminders continue across sessions.
 
 The bot token is never returned by the API and is encrypted at rest when
 `SECRET_ENCRYPTION_KEY` is configured. Telegram updates are deduplicated before
@@ -128,10 +136,11 @@ an HTTP-only signed session.
 
 It currently provides:
 
-- route-based Overview, Agents, Playground, Knowledge, Organizations, and Settings pages in one persistent sidebar;
+- route-based Overview, Agents, Users, Playground, Knowledge, Organizations, and Settings pages in one persistent sidebar;
 - a server-proxied Playground for chatting with any agent in the active organization, including citations and token usage;
 - API readiness, organization usage, token quota, and storage summaries;
 - modal workflows for agent and shared knowledge-base creation;
+- organization user management, external identity linking, and per-user memory editing across agents;
 - modal organization LLM provider, model, endpoint, and key configuration;
 - admin-token-protected organization listing, creation, rename, and workspace switching;
 - toast feedback after successful or failed management actions.
@@ -179,6 +188,16 @@ KEY=riwaq_...        # from the response
 curl -sX POST $B/agents -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
   -d '{"name":"Support Bot","systemPrompt":"You are Acme support."}'
 AGENT=...            # agent.id from the response
+
+# 2b. Connect an existing business customer to a platform identity (idempotent)
+curl -sX POST $B/users/connect -H "authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -d '{
+    "userId":"customer_4821",
+    "displayName":"Amina Rahman",
+    "provider":"shopify",
+    "namespace":"store_in",
+    "externalUserId":"gid://shopify/Customer/42"
+  }'
 
 # 3. Add knowledge to the agent's private KB (text…)
 curl -sX POST $B/agents/$AGENT/documents -H "authorization: Bearer $KEY" \
@@ -442,6 +461,12 @@ Webhook payload:
 | POST   | `/agents/:id/memories`                    | add `{ fact, endUserId? }`; omit/null identity for agent-wide memory |
 | PATCH  | `/agents/:id/memories/:memoryId`          | edit a memory and regenerate its embedding |
 | DELETE | `/agents/:id/memories/:memoryId`          | delete one memory |
+| GET    | `/users`                                  | list canonical users in the organization |
+| POST   | `/users/connect`                          | idempotently create/link `{ userId, provider?, namespace?, externalUserId?, mergeExisting? }` |
+| GET    | `/users/:userId`                          | user profile and connected platform identities |
+| PATCH  | `/users/:userId`                          | update `{ displayName }` |
+| GET    | `/users/:userId/memories`                 | user-specific memories across all agents |
+| DELETE | `/users/:userId/identities/:identityId`   | disconnect one platform mapping without deleting user state |
 | GET    | `/agents`                                 | list the organization's agents (paginated)                                       |
 | GET    | `/agents/:id`                             | agent + linked KBs                                                                |
 | POST   | `/knowledge-bases`                        | create a shared KB                                                                |

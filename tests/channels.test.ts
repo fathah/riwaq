@@ -2,14 +2,15 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { app } from '../src/index'
 import { migrate } from '../src/db/migrate'
 import { db, sql } from '../src/db/client'
-import { agentChannels, channelEvents } from '../src/db/schema'
+import { agentChannels, channelEvents, channelSessions } from '../src/db/schema'
 import { eq } from 'drizzle-orm'
 import {
   renderTelegramMarkdown,
   sendTelegramMessage,
   startTelegramTyping,
 } from '../src/lib/telegram'
-import { recordTelegramUpdate } from '../src/services/channels'
+import { conversationForChannel, processChannelEvent, recordTelegramUpdate } from '../src/services/channels'
+import { budgetHistory } from '../src/services/chat'
 import { startTelegramPolling, stopTelegramPolling } from '../src/services/telegram-polling'
 
 async function api(method: string, path: string, key?: string, body?: unknown, headers: Record<string, string> = {}) {
@@ -136,6 +137,54 @@ describe('Telegram channel management', () => {
     await db.delete(channelEvents).where(eq(channelEvents.id, first.eventId))
   })
 
+  it('reuses active context but rotates after inactivity or the turn cap', async () => {
+    const input = {
+      channelId,
+      agentId,
+      externalChatId: '77',
+      externalUserId: '77',
+      endUserId: 'telegram:77',
+    }
+    const first = await conversationForChannel(input)
+    const second = await conversationForChannel(input)
+    expect(second).toBe(first)
+
+    let [session] = await db.select().from(channelSessions).where(eq(channelSessions.externalChatId, '77'))
+    expect(session?.turnCount).toBe(2)
+
+    await db
+      .update(channelSessions)
+      .set({ updatedAt: new Date(Date.now() - 31 * 60_000) })
+      .where(eq(channelSessions.id, session!.id))
+    const afterIdle = await conversationForChannel(input)
+    expect(afterIdle).not.toBe(first)
+
+    ;[session] = await db.select().from(channelSessions).where(eq(channelSessions.id, session!.id))
+    expect(session).toMatchObject({ conversationId: afterIdle, turnCount: 1 })
+    await db
+      .update(channelSessions)
+      .set({ turnCount: 20, updatedAt: new Date() })
+      .where(eq(channelSessions.id, session!.id))
+    const afterCap = await conversationForChannel(input)
+    expect(afterCap).not.toBe(afterIdle)
+    ;[session] = await db.select().from(channelSessions).where(eq(channelSessions.id, session!.id))
+    expect(session).toMatchObject({ conversationId: afterCap, turnCount: 1 })
+  })
+
+  it('/new removes the active channel session immediately', async () => {
+    const recorded = await recordTelegramUpdate(channelId, {
+      update_id: 104,
+      message: {
+        message_id: 504,
+        text: '/new',
+        from: { id: 77, is_bot: false, first_name: 'Rotation User' },
+        chat: { id: 77, type: 'private' },
+      },
+    })
+    await processChannelEvent(recorded.eventId)
+    expect(await db.select().from(channelSessions).where(eq(channelSessions.externalChatId, '77'))).toHaveLength(0)
+  })
+
   it('stops polling and removes the local connection', async () => {
     const response = await api('DELETE', `/agents/${agentId}/channels/${channelId}`, key)
     expect(response).toEqual({ status: 200, json: { ok: true } })
@@ -145,6 +194,14 @@ describe('Telegram channel management', () => {
 })
 
 describe('Telegram answer framing', () => {
+  it('keeps only recent history that fits the context character budget', () => {
+    const history = [
+      { role: 'user' as const, content: 'a'.repeat(6_000) },
+      { role: 'assistant' as const, content: 'b'.repeat(3_000) },
+    ]
+    expect(budgetHistory(history, 8_000)).toEqual([history[1]])
+  })
+
   it('refreshes the typing action until processing stops', async () => {
     const before = telegramCalls.filter((call) => call.method === 'sendChatAction').length
     const typing = startTelegramTyping(token, { chatId: '42', refreshMs: 10 })

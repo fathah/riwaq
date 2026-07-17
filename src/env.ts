@@ -88,6 +88,11 @@ const schema = z.object({
     .enum(['0', '1', 'true', 'false'])
     .default('1')
     .transform((v) => v === '1' || v === 'true'),
+  // Messaging sessions rotate after either boundary. This prevents one eternal
+  // Telegram/WhatsApp thread from carrying stale short-term context forever;
+  // canonical long-term user memory remains available across rotations.
+  CHANNEL_SESSION_IDLE_MINUTES: z.coerce.number().int().positive().default(30),
+  CHANNEL_SESSION_MAX_TURNS: z.coerce.number().int().positive().default(20),
 
   // --- Retrieval tuning ---
   // Drop retrieved chunks below this cosine similarity (0..1). 0 = keep all.

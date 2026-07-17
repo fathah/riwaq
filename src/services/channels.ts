@@ -3,6 +3,7 @@ import { and, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agentChannels, agents, channelEvents, channelSessions, conversations } from '../db/schema'
 import { decryptSecret, encryptSecret, encryptionEnabled } from '../lib/crypto'
+import { env } from '../env'
 import {
   deleteTelegramWebhook,
   getTelegramBot,
@@ -13,6 +14,7 @@ import {
   type TelegramUpdate,
 } from '../lib/telegram'
 import { prepareChatTurn, runPrepared } from './chat'
+import { resolvePlatformUser } from './users'
 
 export class ChannelError extends Error {
   constructor(message: string, public status = 400) {
@@ -177,7 +179,7 @@ export async function recordTelegramUpdate(
   return { eventId: existing.id, shouldEnqueue: existing.status === 'pending' || existing.status === 'error' }
 }
 
-async function conversationForChannel(input: {
+export async function conversationForChannel(input: {
   channelId: string
   agentId: string
   externalChatId: string
@@ -185,8 +187,15 @@ async function conversationForChannel(input: {
   endUserId: string
 }): Promise<string> {
   return db.transaction(async (tx) => {
+    const now = new Date()
+    const idleCutoff = now.getTime() - env.CHANNEL_SESSION_IDLE_MINUTES * 60_000
     const [existing] = await tx
-      .select({ conversationId: channelSessions.conversationId })
+      .select({
+        id: channelSessions.id,
+        conversationId: channelSessions.conversationId,
+        turnCount: channelSessions.turnCount,
+        updatedAt: channelSessions.updatedAt,
+      })
       .from(channelSessions)
       .where(and(
         eq(channelSessions.channelId, input.channelId),
@@ -194,7 +203,28 @@ async function conversationForChannel(input: {
         eq(channelSessions.externalUserId, input.externalUserId),
       ))
       .limit(1)
-    if (existing) return existing.conversationId
+      .for('update')
+    if (existing) {
+      const rotate = existing.turnCount >= env.CHANNEL_SESSION_MAX_TURNS
+        || existing.updatedAt.getTime() <= idleCutoff
+      if (!rotate) {
+        await tx
+          .update(channelSessions)
+          .set({ turnCount: existing.turnCount + 1, updatedAt: now })
+          .where(eq(channelSessions.id, existing.id))
+        return existing.conversationId
+      }
+
+      const [conversation] = await tx
+        .insert(conversations)
+        .values({ agentId: input.agentId, endUserId: input.endUserId })
+        .returning({ id: conversations.id })
+      await tx
+        .update(channelSessions)
+        .set({ conversationId: conversation!.id, turnCount: 1, updatedAt: now })
+        .where(eq(channelSessions.id, existing.id))
+      return conversation!.id
+    }
 
     const [conversation] = await tx
       .insert(conversations)
@@ -207,13 +237,15 @@ async function conversationForChannel(input: {
         externalChatId: input.externalChatId,
         externalUserId: input.externalUserId,
         conversationId: conversation!.id,
+        turnCount: 1,
+        updatedAt: now,
       })
       .onConflictDoNothing({ target: [channelSessions.channelId, channelSessions.externalChatId, channelSessions.externalUserId] })
       .returning({ conversationId: channelSessions.conversationId })
     if (inserted[0]) return inserted[0].conversationId
 
     const [winner] = await tx
-      .select({ conversationId: channelSessions.conversationId })
+      .select({ id: channelSessions.id, conversationId: channelSessions.conversationId, turnCount: channelSessions.turnCount })
       .from(channelSessions)
       .where(and(
         eq(channelSessions.channelId, input.channelId),
@@ -221,8 +253,13 @@ async function conversationForChannel(input: {
         eq(channelSessions.externalUserId, input.externalUserId),
       ))
       .limit(1)
+      .for('update')
     await tx.delete(conversations).where(eq(conversations.id, conversation!.id))
     if (!winner) throw new Error('failed to establish channel conversation')
+    await tx
+      .update(channelSessions)
+      .set({ turnCount: winner.turnCount + 1, updatedAt: now })
+      .where(eq(channelSessions.id, winner.id))
     return winner.conversationId
   })
 }
@@ -247,7 +284,8 @@ function telegramIdentity(update: TelegramUpdate) {
     message,
     externalChatId: String(message.chat.id),
     externalUserId: String(message.from.id),
-    endUserId: `telegram:${message.from.id}`,
+    fallbackEndUserId: `telegram:${message.from.id}`,
+    displayName: [message.from.first_name, message.from.last_name].filter(Boolean).join(' ') || message.from.username || null,
   }
 }
 
@@ -272,7 +310,14 @@ export async function processChannelEvent(eventId: string): Promise<void> {
       return
     }
 
-    const { message, externalChatId, externalUserId, endUserId } = identity
+    const { message, externalChatId, externalUserId, fallbackEndUserId, displayName } = identity
+    const endUserId = await resolvePlatformUser({
+      orgId: row.agent.orgId,
+      provider: 'telegram',
+      externalUserId,
+      fallbackUserId: fallbackEndUserId,
+      displayName,
+    })
     let responseText = row.event.responseText
     if (!responseText) {
       const currentCommand = message.text ? command(message.text) : null

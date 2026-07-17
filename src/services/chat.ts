@@ -10,6 +10,7 @@ import { buildSystemPrompt } from '../prompts/system'
 import { enqueueLearn } from '../lib/queue'
 import { assertChatQuota, recordChatUsage, QuotaExceededError } from './usage'
 import { env } from '../env'
+import { ensureEndUser } from './users'
 
 const TOP_K = 6
 const HISTORY_MESSAGES = 10
@@ -88,6 +89,11 @@ export async function prepareChatTurn(input: ChatTurnInput): Promise<PreparedTur
     if (err instanceof QuotaExceededError) throw new ChatError(err.message, 429)
     throw err
   }
+
+  // Every entrypoint converges on an organization-owned user. Native/API users
+  // keep the caller-supplied stable ID; channel adapters resolve their platform
+  // identity before reaching this pipeline.
+  await ensureEndUser(agent.orgId, endUserId)
 
   // 1. Resolve or create the conversation. It must belong to this agent AND to
   // the same end user. A caller-supplied conversationId is NOT proof of identity,
@@ -296,7 +302,7 @@ async function loadHistory(conversationId: string): Promise<ChatMessage[]> {
  * (walking backward from the latest). Guards the context window regardless of
  * whether history came from the DB or a client-supplied OpenAI `messages` array.
  */
-function budgetHistory(history: ChatMessage[], budget: number): ChatMessage[] {
+export function budgetHistory(history: ChatMessage[], budget: number): ChatMessage[] {
   const kept: ChatMessage[] = []
   let remaining = budget
   for (let i = history.length - 1; i >= 0; i--) {

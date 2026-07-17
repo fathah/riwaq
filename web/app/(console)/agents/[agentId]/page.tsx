@@ -3,8 +3,8 @@ import { notFound } from 'next/navigation'
 import { AgentChannelModal } from '../../../../components/agent-channel-modal'
 import { EditAgentInstructionsModal } from '../../../../components/action-modals'
 import { AddAgentMemoryModal, DeleteAgentMemoryModal, EditAgentMemoryModal, ForgetAgentUserModal } from '../../../../components/agent-memory-modals'
-import { getAgent, getAgentChannels, getAgentMemories, RiwaqApiError } from '../../../../lib/riwaq'
-import type { AgentChannel, AgentDetail, AgentMemory } from '../../../../lib/riwaq'
+import { getAgent, getAgentChannels, getAgentMemories, getUsers, RiwaqApiError } from '../../../../lib/riwaq'
+import type { AgentChannel, AgentDetail, AgentMemory, EndUser } from '../../../../lib/riwaq'
 
 function memoryScope(endUserId: string | null): string {
   if (!endUserId) return 'Agent-wide'
@@ -21,6 +21,7 @@ export default async function AgentPage({ params }: { params: Promise<{ agentId:
   let agent: AgentDetail
   let channels: AgentChannel[]
   let memories: AgentMemory[]
+  let users: EndUser[]
 
   try {
     // Keep management reads lightweight under small self-hosted concurrency
@@ -28,6 +29,7 @@ export default async function AgentPage({ params }: { params: Promise<{ agentId:
     agent = await getAgent(agentId)
     channels = await getAgentChannels(agentId)
     memories = await getAgentMemories(agentId)
+    users = await getUsers()
   } catch (error) {
     if (error instanceof RiwaqApiError && error.status === 404) notFound()
     throw error
@@ -79,7 +81,7 @@ export default async function AgentPage({ params }: { params: Promise<{ agentId:
       <section className="agent-memory-section">
         <header className="section-action-header">
           <div><span className="eyebrow">Durable personalization</span><h3>Memory</h3><p>Facts recalled by semantic relevance. User-specific memories stay isolated from every other identity.</p></div>
-          <AddAgentMemoryModal agentId={agent.id} />
+          <AddAgentMemoryModal agentId={agent.id} users={users} />
         </header>
         {memories.length === 0 ? (
           <div className="list-card"><div className="empty-state"><span>◇</span><h3>No memories yet</h3><p>Durable facts are extracted after conversations, or you can add one manually.</p></div></div>
