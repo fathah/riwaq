@@ -19,7 +19,7 @@ export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Riwaq API',
-    version: '1.1.0',
+    version: '1.2.0',
     description:
       'Multi-tenant AI agent infrastructure: RAG + per-agent memory + question analytics, ' +
       'a per-org self-learning loop, scheduled reminders with signed webhooks, and an ' +
@@ -28,6 +28,7 @@ export const openApiDocument = {
   servers: [{ url: '/' }],
   tags: [
     { name: 'Organizations' },
+    { name: 'Admin' },
     { name: 'Agents' },
     { name: 'Knowledge' },
     { name: 'Chat' },
@@ -49,6 +50,12 @@ export const openApiDocument = {
         in: 'header',
         name: 'X-End-User-Token',
         description: 'Short-lived HMAC token signed by the org backend; required for chat in production.',
+      },
+      adminToken: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-Admin-Token',
+        description: 'Deployment admin token. Required for organization management.',
       },
     },
     schemas: {
@@ -226,6 +233,24 @@ export const openApiDocument = {
     '/organizations/usage': {
       get: { tags: ['Organizations'], summary: 'Persistent usage + live storage counts and ceilings', security: [{ orgApiKey: [] }], responses: { '200': { description: 'Usage snapshot' } } },
     },
+    '/admin/organizations': {
+      get: {
+        tags: ['Admin'],
+        summary: 'List organizations without exposing API-key hashes or credentials',
+        security: [{ adminToken: [] }],
+        responses: { '200': { description: 'Organizations' }, '401': { description: 'Valid admin token required' } },
+      },
+    },
+    '/admin/organizations/{id}': {
+      patch: {
+        tags: ['Admin'],
+        summary: 'Rename an organization without rotating its API key',
+        security: [{ adminToken: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string', minLength: 1, maxLength: 200 } } } } } },
+        responses: { '200': { description: 'Renamed organization' }, '401': { description: 'Valid admin token required' }, '404': { description: 'Organization not found' } },
+      },
+    },
     '/organizations/llm': {
       put: {
         tags: ['Organizations'],
@@ -277,14 +302,15 @@ export const openApiDocument = {
 
     // --- Knowledge bases + documents ---
     '/knowledge-bases': {
-      post: { tags: ['Knowledge'], summary: 'Create a shared KB', security: [{ orgApiKey: [] }], responses: { '201': { description: 'Created' } } },
+      post: { tags: ['Knowledge'], summary: 'Create an organization-wide shared KB', security: [{ orgApiKey: [] }], responses: { '201': { description: 'Created and readable by every organization agent' } } },
       get: { tags: ['Knowledge'], summary: "List the org's KBs (paginated)", security: [{ orgApiKey: [] }], parameters: [...pageParams], responses: { '200': { description: 'KBs' } } },
     },
     '/agents/{id}/knowledge-bases': {
       get: { tags: ['Knowledge'], summary: 'KBs an agent can read (private + shared)', security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '200': { description: 'KBs' } } },
       post: {
         tags: ['Knowledge'],
-        summary: 'Link a shared KB to an agent',
+        summary: 'Record a legacy shared-KB association',
+        description: 'Shared KBs are already readable by every agent in the organization; this compatibility endpoint only records association metadata.',
         security: [{ orgApiKey: [] }],
         parameters: [agentIdParam],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['knowledgeBaseId'], properties: { knowledgeBaseId: { type: 'string', format: 'uuid' } } } } } },
@@ -292,7 +318,7 @@ export const openApiDocument = {
       },
     },
     '/agents/{id}/knowledge-bases/{kbId}': {
-      delete: { tags: ['Knowledge'], summary: 'Unlink a shared KB (never the private KB)', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'kbId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Unlinked' }, '400': { description: 'Refused (private KB)' } } },
+      delete: { tags: ['Knowledge'], summary: 'Remove legacy association metadata', description: 'Does not revoke organization-wide access to a shared KB. Private KB associations cannot be removed.', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'kbId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Association metadata removed' }, '400': { description: 'Refused (private KB)' } } },
     },
     '/knowledge-bases/{kbId}/documents': {
       post: {
@@ -309,6 +335,7 @@ export const openApiDocument = {
       post: { tags: ['Knowledge'], summary: "Convenience: upload into the agent's private KB", security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '202': { description: 'Accepted' } } },
     },
     '/knowledge-bases/{kbId}/documents/{docId}': {
+      get: { tags: ['Knowledge'], summary: 'Inspect a document and its indexed text chunks', security: [{ orgApiKey: [] }], parameters: [{ name: 'kbId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'docId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, ...pageParams], responses: { '200': { description: 'Document and indexed chunks' }, '404': { description: 'Not found' } } },
       delete: { tags: ['Knowledge'], summary: 'Delete a document (cascades to chunks)', security: [{ orgApiKey: [] }], parameters: [{ name: 'kbId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'docId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Deleted' }, '404': { description: 'Not found' } } },
     },
 

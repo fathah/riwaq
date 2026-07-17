@@ -108,10 +108,12 @@ an HTTP-only signed session.
 
 It currently provides:
 
-- route-based Overview, Agents, Knowledge, and Settings pages with persistent tabs;
+- route-based Overview, Agents, Playground, Knowledge, Organizations, and Settings pages in one persistent sidebar;
+- a server-proxied Playground for chatting with any agent in the active organization, including citations and token usage;
 - API readiness, organization usage, token quota, and storage summaries;
 - modal workflows for agent and shared knowledge-base creation;
 - modal organization LLM provider, model, endpoint, and key configuration;
+- admin-token-protected organization listing, creation, rename, and workspace switching;
 - toast feedback after successful or failed management actions.
 
 For local development outside Docker:
@@ -130,9 +132,13 @@ and does not expose management actions.
 
 ## Authentication
 
-- `POST /organizations` is **public** and returns an **API key once** — store it.
-- Every other endpoint requires `Authorization: Bearer <key>`. The key resolves to a
+- `POST /organizations` returns an **API key once** — store it. It is admin-token
+  protected when `ADMIN_TOKEN` is configured and rate-limited otherwise.
+- Tenant endpoints require `Authorization: Bearer <key>`. The key resolves to a
   single org, and all queries are scoped to it, so tenants can't see each other's data.
+- Admin organization endpoints require `X-Admin-Token`. The management console can
+  combine it with a signed, server-selected
+  organization ID to switch workspaces. These credentials never reach browser code.
 - In production, chat also requires `X-End-User-Token`: a short-lived HMAC token signed
   by the organization's trusted backend. Its `{ sub, orgId, exp }` claims bind memory
   and conversation access to an authenticated end user; request-body `endUserId` is
@@ -247,7 +253,8 @@ Pluggable, with an **offline fallback** so it runs with no API key:
 | **openai-compatible** | `openai` | `EMBEDDINGS_API_KEY` + `EMBEDDINGS_BASE_URL` | `text-embedding-3-small` |
 
 If `EMBEDDINGS_PROVIDER` is unset: uses **voyage** when `EMBEDDINGS_API_KEY` is set,
-otherwise the **local** offline model (one-time ~23 MB download, then cached). The
+otherwise the **local** offline model (one-time ~23 MB download, then cached). Docker
+Compose persists that download in the `modelcache` volume. The
 `openai` provider points at any `/v1/embeddings` server — OpenAI, a local Ollama, or
 LM Studio.
 
@@ -509,7 +516,7 @@ endpoint, **or** a local offline model (transformers.js) — no key required.
 | `END_USER_SIGNING_SECRET` | production          | base64 32+ byte HMAC key for trusted end-user tokens                     |
 | `LLM_ALLOWED_HOSTS`    | production             | comma-separated outbound provider hostname allowlist                    |
 | `REDIS_URL`            | production             | Redis/Dragonfly URL for durable jobs, shared limits, and caches          |
-| `ADMIN_TOKEN`          | production             | gates organization provisioning and the metrics endpoint                |
+| `ADMIN_TOKEN`          | production             | gates organization provisioning, management, and the metrics endpoint   |
 | `RATE_LIMIT_PER_ORG`   | no                     | requests per organization per window (default 120)                      |
 | `MAX_CONCURRENT_REQUESTS_PER_ORG` | no          | per-node concurrent request cap per organization (default 20)           |
 | `SHUTDOWN_TIMEOUT_MS`  | no                     | maximum graceful HTTP drain time (default 15000)                        |

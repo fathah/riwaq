@@ -171,6 +171,9 @@ export async function complete(opts: CallOpts): Promise<LLMResult> {
       model: config.model,
       messages: [{ role: 'system', content: opts.system }, ...opts.messages],
       max_tokens: opts.maxTokens ?? 1024,
+      // Some OpenAI-compatible providers default to SSE unless this is sent
+      // explicitly, even for the SDK's non-streaming request path.
+      stream: false,
       ...(temperature !== undefined ? { temperature } : {}),
     })
     return {

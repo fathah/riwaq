@@ -11,12 +11,14 @@ describe('OpenAPI contract', () => {
       paths: Record<string, unknown>
     }
     expect(spec.openapi).toBe('3.1.0')
-    expect(spec.info.version).toBe('1.1.0')
+    expect(spec.info.version).toBe('1.2.0')
 
     // Chat surfaces (native + OpenAI-compatible).
     expect(spec.paths['/agents/{id}/chat']).toBeDefined()
     expect(spec.paths['/agents']).toMatchObject({ get: expect.any(Object), post: expect.any(Object) })
     expect(spec.paths['/v1/chat/completions']).toBeDefined()
+    expect(spec.paths['/admin/organizations']).toBeDefined()
+    expect(spec.paths['/admin/organizations/{id}']).toBeDefined()
 
     // Self-learning + reminders must be documented.
     for (const path of [

@@ -23,6 +23,10 @@ services:
   # and rate limiting. A drop-in for Redis with far better memory/CPU efficiency.
   dragonfly:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    # BullMQ creates per-job keys inside Lua scripts instead of declaring every
+    # generated key up front. Dragonfly rejects those scripts unless this
+    # compatibility flag is enabled, leaving ingestion jobs unable to enqueue.
+    command: ["--default_lua_flags=allow-undeclared-keys"]
     ulimits:
       memlock: -1
     ports:
@@ -48,13 +52,15 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-anthropic}
       EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       PORT: 3000
     ports:
-      - "3000:3000"
+      - "${API_PORT:-3000}:3000"
     # Dev convenience: live-reload against local source.
     command: npm run dev
     volumes:
       - ./src:/app/src
+      - modelcache:/app/.cache/huggingface
 
   web:
     build:
@@ -66,6 +72,7 @@ services:
       RIWAQ_API_URL: http://api:3000
       RIWAQ_PUBLIC_API_URL: ${RIWAQ_PUBLIC_API_URL:-http://localhost:3000}
       RIWAQ_API_KEY: ${RIWAQ_API_KEY:-}
+      RIWAQ_ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       RIWAQ_DASHBOARD_TOKEN: ${RIWAQ_DASHBOARD_TOKEN:-}
     ports:
       - "${WEB_PORT:-3001}:3001"
@@ -73,3 +80,4 @@ services:
 volumes:
   pgdata:
   dragonflydata:
+  modelcache:

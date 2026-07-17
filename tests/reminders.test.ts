@@ -38,7 +38,7 @@ async function api(method: string, path: string, key?: string, body?: unknown) {
 }
 
 async function makeOrgAgent(name: string) {
-  const org = (await api('POST', '/organizations', undefined, { name: `${name}-org` })).json
+  const org = (await api('POST', '/organizations', 'test-admin-token', { name: `${name}-org` })).json
   const agent = (await api('POST', '/agents', org.apiKey, { name })).json
   return { orgId: org.id, key: org.apiKey, agentId: agent.agent.id }
 }

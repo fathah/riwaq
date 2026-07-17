@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource-variable/manrope": "^5.2.8",
     "next": "16.2.10",
     "react": "19.2.7",
     "react-dom": "19.2.7",

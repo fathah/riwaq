@@ -28,7 +28,7 @@ export function CreateAgentModal() {
 
 export function CreateKnowledgeBaseModal() {
   return (
-    <Modal trigger="New knowledge base" title="Create a knowledge base" description="Shared knowledge can be connected to multiple agents.">
+    <Modal trigger="New knowledge base" title="Create a knowledge base" description="Shared knowledge is available to every agent in the organization.">
       <form action={createKnowledgeBaseAction} className="modal-form">
         <label><span>Name</span><input name="name" required autoFocus placeholder="Company policies" /></label>
         <footer className="modal-actions"><span>Documents can be added after creation.</span><SubmitButton label="Create knowledge base" /></footer>
@@ -46,7 +46,7 @@ export function EditLlmModal({ organization }: { organization: Organization }) {
           <label><span>Model</span><input name="model" defaultValue={organization.llm.model ?? ''} placeholder="Deployment default" /></label>
         </div>
         <label><span>Base URL</span><input name="baseUrl" type="url" defaultValue={organization.llm.baseUrl ?? ''} placeholder="https://api.openai.com/v1" /></label>
-        <label><span>New API key</span><input name="apiKey" type="password" autoComplete="new-password" placeholder={organization.llm.hasApiKey ? 'Leave blank to keep the current key' : 'Enter a provider key'} /></label>
+        <label><span>New API key</span><input name="apiKey" type="password" autoComplete="new-password" placeholder={organization.llm.hasApiKey ? 'Leave blank to keep the current key' : 'Enter a provider key'} /><small>Paste the raw provider key only. Spaces and copied status symbols are not allowed.</small></label>
         <footer className="modal-actions"><span>Only non-empty fields are updated.</span><SubmitButton label="Save settings" /></footer>
       </form>
     </Modal>

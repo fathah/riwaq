@@ -49,7 +49,9 @@ curl http://localhost:3000/ready
 ```
 
 The dashboard starts in setup mode until `RIWAQ_API_KEY` and
-`RIWAQ_DASHBOARD_TOKEN` are set in `.env`. Follow the instructions at
+`RIWAQ_DASHBOARD_TOKEN` are set in `.env`. Set `ADMIN_TOKEN` as well to enable
+organization listing, creation, rename, and workspace switching; Compose passes
+it to the console as the server-only `RIWAQ_ADMIN_TOKEN`. Follow the instructions at
 `http://localhost:3001`, then recreate only the web service:
 
 ```bash
@@ -94,7 +96,8 @@ curl http://localhost:3000/ready
 ```
 
 The API and dashboard ports are published. PostgreSQL and DragonflyDB remain on the
-private Compose network. Their data is stored in named volumes. The dashboard keeps
+private Compose network. Their data is stored in named volumes, and `modelcache`
+keeps the local embedding model after its first download. The dashboard keeps
 `RIWAQ_API_KEY` on its server and protects the UI with `RIWAQ_DASHBOARD_TOKEN`.
 
 On the first boot, visit `http://localhost:3001`. If there is no organization API key

@@ -7,6 +7,7 @@ import { cacheGet, cacheSet } from '../lib/cache'
 import { checkRateLimit } from '../lib/rate-limit'
 import { env } from '../env'
 import type { AppEnv } from '../types'
+import { hasValidAdminToken } from '../lib/admin-auth'
 
 const inFlightByOrg = new Map<string, number>()
 
@@ -14,27 +15,36 @@ const inFlightByOrg = new Map<string, number>()
 // applies a per-org rate limit. Every protected route runs through this, so
 // handlers can trust c.get('orgId') and every tenant is rate-limited by default.
 export const orgAuth = createMiddleware<AppEnv>(async (c, next) => {
+  const selectedOrgId = c.req.header('x-riwaq-organization-id')?.trim()
   const header = c.req.header('authorization')
   const key = header?.startsWith('Bearer ') ? header.slice(7).trim() : c.req.header('x-api-key')
+  let orgId: string | undefined
+  let adminScoped = false
 
-  if (!key) {
-    return c.json({ error: 'missing API key (use Authorization: Bearer <key>)' }, 401)
-  }
-
-  // Resolve org by API-key hash. Cache the hash→orgId mapping in DragonflyDB so the
-  // hot auth path skips a DB round-trip (short TTL bounds staleness of any revocation).
-  const hash = hashApiKey(key)
-  const cacheKey = `auth:${hash}`
-  let orgId = await cacheGet<string>(cacheKey)
-  if (!orgId) {
-    const [org] = await db
-      .select({ id: organizations.id })
-      .from(organizations)
-      .where(eq(organizations.apiKeyHash, hash))
-      .limit(1)
-    if (!org) return c.json({ error: 'invalid API key' }, 401)
+  if (selectedOrgId) {
+    if (!hasValidAdminToken(c)) return c.json({ error: 'valid admin token required for organization selection' }, 401)
+    const [org] = await db.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, selectedOrgId)).limit(1)
+    if (!org) return c.json({ error: 'organization not found' }, 404)
     orgId = org.id
-    await cacheSet(cacheKey, orgId)
+    adminScoped = true
+  } else if (!key) {
+    return c.json({ error: 'missing API key (use Authorization: Bearer <key>)' }, 401)
+  } else {
+    // Resolve org by API-key hash. Cache the hash→orgId mapping in DragonflyDB so the
+    // hot auth path skips a DB round-trip (short TTL bounds staleness of any revocation).
+    const hash = hashApiKey(key)
+    const cacheKey = `auth:${hash}`
+    orgId = (await cacheGet<string>(cacheKey)) ?? undefined
+    if (!orgId) {
+      const [org] = await db
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(eq(organizations.apiKeyHash, hash))
+        .limit(1)
+      if (!org) return c.json({ error: 'invalid API key' }, 401)
+      orgId = org.id
+      await cacheSet(cacheKey, orgId)
+    }
   }
 
   // Per-org fixed-window rate limit.
@@ -53,6 +63,7 @@ export const orgAuth = createMiddleware<AppEnv>(async (c, next) => {
   }
 
   c.set('orgId', orgId)
+  c.set('adminScoped', adminScoped)
   inFlightByOrg.set(orgId, inFlight + 1)
   try {
     await next()

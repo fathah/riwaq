@@ -3,6 +3,7 @@
 export type AppEnv = {
   Variables: {
     orgId: string
+    adminScoped: boolean
     requestId: string
   }
 }

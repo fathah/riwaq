@@ -4,7 +4,7 @@ import { DashboardShell } from '../../components/dashboard-shell'
 import { SetupScreen } from '../../components/setup-screen'
 import { isDashboardAuthenticated } from '../../lib/auth'
 import { getDashboardSetup } from '../../lib/config'
-import { getOrganization, getReady } from '../../lib/riwaq'
+import { getManagedOrganizations, getOrganization, getReady, organizationManagementEnabled, type ManagedOrganization } from '../../lib/riwaq'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,7 +14,9 @@ export default async function ConsoleLayout({ children }: { children: ReactNode 
 
   try {
     const [ready, organization] = await Promise.all([getReady(), getOrganization()])
-    return <DashboardShell apiUrl={setup.config.publicApiUrl} organization={organization} ready={ready.ready}>{children}</DashboardShell>
+    let managedOrganizations: ManagedOrganization[] = [{ ...organization, apiKeyPrefix: null, llm: { provider: organization.llm.provider, model: organization.llm.model } }]
+    if (organizationManagementEnabled()) managedOrganizations = await getManagedOrganizations()
+    return <DashboardShell apiUrl={setup.config.publicApiUrl} organization={organization} organizations={managedOrganizations} ready={ready.ready}>{children}</DashboardShell>
   } catch (cause) {
     return <SetupScreen issues={[cause instanceof Error ? cause.message : 'Unable to connect to the Riwaq API']} apiUrl={setup.config.publicApiUrl} connectionError />
   }

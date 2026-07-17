@@ -28,7 +28,7 @@ async function api(method: string, path: string, key?: string, body?: unknown) {
 }
 
 async function createOrg(name: string): Promise<{ id: string; key: string }> {
-  const { json } = await api('POST', '/organizations', undefined, { name })
+  const { json } = await api('POST', '/organizations', 'test-admin-token', { name })
   return { id: json.id, key: json.apiKey }
 }
 

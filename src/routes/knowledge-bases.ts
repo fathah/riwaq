@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, desc, eq, or } from 'drizzle-orm'
 import { db } from '../db/client'
 import { knowledgeBases, agentKnowledgeBases } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
@@ -15,7 +15,8 @@ knowledgeBasesRoute.use('*', orgAuth)
 const createSchema = z.object({ name: z.string().min(1) })
 const linkSchema = z.object({ knowledgeBaseId: z.string().uuid() })
 
-// Create a shared KB (org-level, linkable to many agents).
+// Create a shared KB. Shared knowledge is immediately readable by every agent in
+// the organization; private agent KBs remain isolated to their owner.
 knowledgeBasesRoute.post('/knowledge-bases', async (c) => {
   const orgId = c.get('orgId')
   const parsed = createSchema.safeParse(await c.req.json().catch(() => ({})))
@@ -42,7 +43,7 @@ knowledgeBasesRoute.get('/knowledge-bases', async (c) => {
   return c.json(rows)
 })
 
-// KBs a specific agent can read.
+// KBs a specific agent can read: its private KB plus all organization-wide shared KBs.
 knowledgeBasesRoute.get('/agents/:id/knowledge-bases', async (c) => {
   const orgId = c.get('orgId')
   const agent = await getAgentInOrg(c.req.param('id'), orgId)
@@ -54,13 +55,19 @@ knowledgeBasesRoute.get('/agents/:id/knowledge-bases', async (c) => {
       name: knowledgeBases.name,
       isDefault: knowledgeBases.isDefault,
     })
-    .from(agentKnowledgeBases)
-    .innerJoin(knowledgeBases, eq(knowledgeBases.id, agentKnowledgeBases.knowledgeBaseId))
-    .where(eq(agentKnowledgeBases.agentId, agent.id))
+    .from(knowledgeBases)
+    .where(
+      and(
+        eq(knowledgeBases.orgId, orgId),
+        or(eq(knowledgeBases.isDefault, false), eq(knowledgeBases.agentId, agent.id)),
+      ),
+    )
   return c.json(rows)
 })
 
-// Link a shared KB to an agent. Both must belong to the caller's org.
+// Legacy association endpoint retained for API compatibility. Shared KB access is
+// organization-wide now, so this row is metadata only; both records must still
+// belong to the caller's org and private KB isolation remains enforced.
 knowledgeBasesRoute.post('/agents/:id/knowledge-bases', async (c) => {
   const orgId = c.get('orgId')
   const agent = await getAgentInOrg(c.req.param('id'), orgId)
@@ -82,7 +89,8 @@ knowledgeBasesRoute.post('/agents/:id/knowledge-bases', async (c) => {
   return c.json({ ok: true, agentId: agent.id, knowledgeBaseId: kb.id }, 201)
 })
 
-// Unlink a shared KB. Refuse to unlink the agent's own private KB this way.
+// Remove a legacy shared-KB association. This does not revoke organization-wide
+// shared knowledge access. Refuse to unlink the agent's private KB this way.
 knowledgeBasesRoute.delete('/agents/:id/knowledge-bases/:kbId', async (c) => {
   const orgId = c.get('orgId')
   const agent = await getAgentInOrg(c.req.param('id'), orgId)

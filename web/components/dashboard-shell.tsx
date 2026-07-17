@@ -8,11 +8,15 @@ import { logoutAction } from '../app/actions'
 import type { Organization } from '../lib/riwaq'
 import { Icon, type IconName } from './icons'
 import { ToastFeedback } from './toast-feedback'
+import { OrganizationSwitcher } from './organization-switcher'
+import type { ManagedOrganization } from '../lib/riwaq'
 
 const navigation: { href: string; label: string; icon: IconName }[] = [
   { href: '/overview', label: 'Overview', icon: 'grid' },
   { href: '/agents', label: 'Agents', icon: 'bot' },
+  { href: '/playground', label: 'Playground', icon: 'playground' },
   { href: '/knowledge', label: 'Knowledge', icon: 'book' },
+  { href: '/organizations', label: 'Organizations', icon: 'organization' },
   { href: '/settings', label: 'Settings', icon: 'settings' },
 ]
 
@@ -20,10 +24,11 @@ type DashboardShellProps = {
   organization: Organization
   ready: boolean
   apiUrl: string
+  organizations: ManagedOrganization[]
   children: ReactNode
 }
 
-export function DashboardShell({ organization, ready, apiUrl, children }: DashboardShellProps) {
+export function DashboardShell({ organization, organizations, ready, apiUrl, children }: DashboardShellProps) {
   const pathname = usePathname()
 
   return (
@@ -41,12 +46,8 @@ export function DashboardShell({ organization, ready, apiUrl, children }: Dashbo
 
       <section className="dashboard-main">
         <header className="topbar">
-          <div><span className="eyebrow">Organization workspace</span><h1>{organization.name}</h1></div>
-          <div className="org-avatar">{organization.name.slice(0, 2).toUpperCase()}</div>
+          <OrganizationSwitcher activeId={organization.id} organizations={organizations} />
         </header>
-        <nav aria-label="Console sections" className="route-tabs" role="tablist">
-          {navigation.map((item) => <Link aria-selected={pathname === item.href} className={pathname === item.href ? 'tab-active' : ''} href={item.href} key={item.href} role="tab">{item.label}</Link>)}
-        </nav>
         {children}
       </section>
 
@@ -55,9 +56,9 @@ export function DashboardShell({ organization, ready, apiUrl, children }: Dashbo
         position="top-right"
         toastOptions={{
           duration: 4200,
-          style: { border: '1px solid #e5e9e6', borderRadius: '12px', color: '#17231d', boxShadow: '0 18px 45px rgba(30,48,39,.14)', fontSize: '13px' },
-          success: { iconTheme: { primary: '#0f8b62', secondary: '#fff' } },
-          error: { iconTheme: { primary: '#ba3d45', secondary: '#fff' } },
+          style: { border: '1px solid #d4d4d4', borderRadius: '5px', color: '#0a0a0a', boxShadow: 'none', fontSize: '13px' },
+          success: { iconTheme: { primary: '#0a0a0a', secondary: '#fff' } },
+          error: { iconTheme: { primary: '#0a0a0a', secondary: '#fff' } },
         }}
       />
     </main>

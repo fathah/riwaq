@@ -108,9 +108,17 @@ let extractorPromise: Promise<(input: string[], opts: object) => Promise<{ tolis
 async function getExtractor() {
   if (!extractorPromise) {
     // Imported lazily so the heavy runtime only loads when the local provider is used.
-    extractorPromise = import('@huggingface/transformers').then(({ pipeline }) =>
-      pipeline('feature-extraction', modelFor('local')),
-    ) as Promise<(input: string[], opts: object) => Promise<{ tolist(): number[][] }>>
+    const loading = import('@huggingface/transformers').then(({ env: transformersEnv, pipeline }) => {
+      // Transformers.js does not read HF_HOME itself. Point its filesystem cache
+      // at the writable, persistent container path instead of node_modules/.cache.
+      if (process.env.HF_HOME) transformersEnv.cacheDir = process.env.HF_HOME
+      return pipeline('feature-extraction', modelFor('local'))
+    }) as Promise<(input: string[], opts: object) => Promise<{ tolist(): number[][] }>>
+    // A transient first-download failure must not poison the process forever.
+    extractorPromise = loading.catch((error) => {
+      extractorPromise = null
+      throw error
+    })
   }
   return extractorPromise
 }

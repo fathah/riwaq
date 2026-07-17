@@ -39,8 +39,8 @@ export function SetupScreen({ issues, apiUrl, connectionError = false }: SetupSc
           <span className="step-number">02</span>
           <h2>Set web environment variables</h2>
           <p>Use <code>web/.env.local</code> for local development or the root <code>.env</code> with Docker Compose.</p>
-          <pre><code>{`RIWAQ_API_URL=${displayUrl}\nRIWAQ_API_KEY=riwaq_replace_me\nRIWAQ_DASHBOARD_TOKEN=replace_with_32_plus_chars`}</code></pre>
-          <small>Generate the access token with <code>openssl rand -hex 32</code>.</small>
+          <pre><code>{`RIWAQ_API_URL=${displayUrl}\nRIWAQ_API_KEY=riwaq_replace_me\nRIWAQ_ADMIN_TOKEN=copy_api_admin_token\nRIWAQ_DASHBOARD_TOKEN=replace_with_32_plus_chars`}</code></pre>
+          <small>The admin token enables organization management. Generate the dashboard access token with <code>openssl rand -hex 32</code>.</small>
         </article>
 
         <article className="setup-card">

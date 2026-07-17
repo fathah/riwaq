@@ -29,7 +29,7 @@ afterAll(async () => {
 
 describe('topic clustering', () => {
   it('moves a matched cluster’s centroid toward the new question (running mean)', async () => {
-    const org = (await api('POST', '/organizations', undefined, { name: 'topics-org' })).json
+    const org = (await api('POST', '/organizations', 'test-admin-token', { name: 'topics-org' })).json
     const agent = (await api('POST', '/agents', org.apiKey, { name: 't' })).json.agent
 
     // A pre-seeded topic centroid = [1,0,0,0,0,0,0,0], count 1.
@@ -73,7 +73,7 @@ describe('topic clustering', () => {
   })
 
   it('is idempotent: re-running the same message does not double-count', async () => {
-    const org = (await api('POST', '/organizations', undefined, { name: 'topics-org2' })).json
+    const org = (await api('POST', '/organizations', 'test-admin-token', { name: 'topics-org2' })).json
     const agent = (await api('POST', '/agents', org.apiKey, { name: 't2' })).json.agent
 
     const centroid = Array.from({ length: 8 }, (_, i) => (i === 0 ? 1 : 0))

@@ -1,4 +1,5 @@
 import { requireDashboardConfig } from './config'
+import { getSelectedOrganizationId } from './auth'
 
 export type Organization = {
   id: string
@@ -42,6 +43,54 @@ export type KnowledgeBase = {
   createdAt: string
 }
 
+export type KnowledgeDocument = {
+  id: string
+  knowledgeBaseId: string
+  name: string
+  source: 'file' | 'text'
+  status: 'processing' | 'ready' | 'error'
+  createdAt: string
+}
+
+export type KnowledgeChunk = {
+  id: string
+  content: string
+  metadata: { index?: number }
+  createdAt: string
+}
+
+export type KnowledgeDocumentDetail = {
+  document: KnowledgeDocument
+  chunks: KnowledgeChunk[]
+  page: { limit: number; offset: number; hasMore: boolean }
+}
+
+export type ManagedOrganization = {
+  id: string
+  name: string
+  createdAt: string
+  apiKeyPrefix: string | null
+  llm: { provider: string | null; model: string | null }
+}
+
+export type ChatCitation = {
+  chunkId: string
+  documentId: string
+  documentName: string
+  knowledgeBaseId: string
+  kbName: string
+  similarity: number
+}
+
+export type ChatResult = {
+  conversationId: string
+  answer: string
+  citations: ChatCitation[]
+  model: string
+  usage: { inputTokens: number; outputTokens: number }
+  finishReason: string
+}
+
 export class RiwaqApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message)
@@ -49,18 +98,62 @@ export class RiwaqApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const { apiUrl, apiKey } = requireDashboardConfig()
+  const { apiUrl, apiKey, adminToken } = requireDashboardConfig()
   const headers = new Headers(init.headers)
-  headers.set('authorization', `Bearer ${apiKey}`)
+  const selectedOrganizationId = adminToken ? await getSelectedOrganizationId() : null
+  if (adminToken && selectedOrganizationId) {
+    headers.set('x-admin-token', adminToken)
+    headers.set('x-riwaq-organization-id', selectedOrganizationId)
+  } else {
+    headers.set('authorization', `Bearer ${apiKey}`)
+  }
   headers.set('accept', 'application/json')
-  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json')
+  if (init.body && !(init.body instanceof FormData) && !headers.has('content-type')) headers.set('content-type', 'application/json')
 
   const response = await fetch(new URL(path, `${apiUrl}/`), {
     ...init,
     headers,
     cache: 'no-store',
-    signal: AbortSignal.timeout(10_000),
+    signal: init.signal ?? AbortSignal.timeout(10_000),
   })
+  const payload = (await response.json().catch(() => null)) as { error?: unknown } | null
+  if (!response.ok) {
+    const message = typeof payload?.error === 'string' ? payload.error : `Riwaq API returned ${response.status}`
+    throw new RiwaqApiError(message, response.status)
+  }
+  return payload as T
+}
+
+async function organizationAdminRequest<T>(organizationId: string, path: string, init: RequestInit): Promise<T> {
+  const { apiUrl, adminToken } = requireDashboardConfig()
+  if (!adminToken) return request<T>(path, init)
+  const headers = new Headers(init.headers)
+  headers.set('x-admin-token', adminToken)
+  headers.set('x-riwaq-organization-id', organizationId)
+  headers.set('accept', 'application/json')
+  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json')
+  const response = await fetch(new URL(path, `${apiUrl}/`), {
+    ...init,
+    headers,
+    cache: 'no-store',
+    signal: init.signal ?? AbortSignal.timeout(90_000),
+  })
+  const payload = (await response.json().catch(() => null)) as { error?: unknown } | null
+  if (!response.ok) {
+    const message = typeof payload?.error === 'string' ? payload.error : `Riwaq API returned ${response.status}`
+    throw new RiwaqApiError(message, response.status)
+  }
+  return payload as T
+}
+
+async function adminRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const { apiUrl, adminToken } = requireDashboardConfig()
+  if (!adminToken) throw new RiwaqApiError('Organization management requires RIWAQ_ADMIN_TOKEN', 403)
+  const headers = new Headers(init.headers)
+  headers.set('x-admin-token', adminToken)
+  headers.set('accept', 'application/json')
+  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json')
+  const response = await fetch(new URL(path, `${apiUrl}/`), { ...init, headers, cache: 'no-store', signal: AbortSignal.timeout(10_000) })
   const payload = (await response.json().catch(() => null)) as { error?: unknown } | null
   if (!response.ok) {
     const message = typeof payload?.error === 'string' ? payload.error : `Riwaq API returned ${response.status}`
@@ -97,6 +190,40 @@ export function getKnowledgeBases() {
   return request<KnowledgeBase[]>('/knowledge-bases?limit=200')
 }
 
+export function getKnowledgeDocuments(knowledgeBaseId: string) {
+  return request<KnowledgeDocument[]>(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents?limit=200`)
+}
+
+export function getKnowledgeDocument(knowledgeBaseId: string, documentId: string) {
+  return request<KnowledgeDocumentDetail>(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}?limit=200`)
+}
+
+export function uploadKnowledgeDocument(knowledgeBaseId: string, input: FormData | { name: string; text: string }) {
+  return request<{ documentId: string; name: string; status: string }>(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents`, {
+    method: 'POST',
+    body: input instanceof FormData ? input : JSON.stringify(input),
+    signal: AbortSignal.timeout(90_000),
+  })
+}
+
+export function deleteKnowledgeDocument(knowledgeBaseId: string, documentId: string) {
+  return request<{ ok: true }>(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' })
+}
+
+export async function chatWithAgent(agentId: string, input: { message: string; conversationId?: string }) {
+  const selectedOrganizationId = await getSelectedOrganizationId()
+  const organizationId = selectedOrganizationId ?? (await getOrganization()).id
+  return organizationAdminRequest<ChatResult>(organizationId, `/agents/${encodeURIComponent(agentId)}/chat`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(90_000),
+    body: JSON.stringify({
+      message: input.message,
+      endUserId: 'riwaq-console-playground',
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    }),
+  })
+}
+
 export function createAgent(input: { name: string; systemPrompt?: string; provider?: string; model?: string }) {
   return request('/agents', { method: 'POST', body: JSON.stringify(input) })
 }
@@ -107,4 +234,20 @@ export function createKnowledgeBase(name: string) {
 
 export function updateOrganizationLlm(input: Record<string, string>) {
   return request('/organizations/llm', { method: 'PUT', body: JSON.stringify(input) })
+}
+
+export function organizationManagementEnabled(): boolean {
+  return !!requireDashboardConfig().adminToken
+}
+
+export function getManagedOrganizations() {
+  return adminRequest<ManagedOrganization[]>('/admin/organizations')
+}
+
+export function createManagedOrganization(name: string) {
+  return adminRequest<Pick<ManagedOrganization, 'id' | 'name' | 'createdAt'> & { apiKey: string }>('/organizations', { method: 'POST', body: JSON.stringify({ name }) })
+}
+
+export function renameManagedOrganization(id: string, name: string) {
+  return adminRequest<{ id: string; name: string; createdAt: string }>(`/admin/organizations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) })
 }

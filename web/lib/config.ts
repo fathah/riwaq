@@ -8,6 +8,7 @@ export type DashboardConfig = {
   apiUrl: string
   publicApiUrl: string
   apiKey: string
+  adminToken: string
   accessToken: string
 }
 
@@ -19,6 +20,7 @@ export function getDashboardSetup(): DashboardSetup {
   const rawUrl = process.env.RIWAQ_API_URL?.trim() ?? ''
   const apiKey = process.env.RIWAQ_API_KEY?.trim() ?? ''
   const accessToken = process.env.RIWAQ_DASHBOARD_TOKEN?.trim() ?? ''
+  const adminToken = process.env.RIWAQ_ADMIN_TOKEN?.trim() ?? ''
   const rawPublicUrl = process.env.RIWAQ_PUBLIC_API_URL?.trim() ?? ''
   const issues: string[] = []
   let apiUrl = rawUrl
@@ -42,7 +44,7 @@ export function getDashboardSetup(): DashboardSetup {
 
   const publicApiUrl = rawPublicUrl || apiUrl || 'http://localhost:3000'
   if (issues.length > 0) return { configured: false, issues, apiUrl, publicApiUrl }
-  return { configured: true, config: { apiUrl, publicApiUrl, apiKey, accessToken }, issues: [] }
+  return { configured: true, config: { apiUrl, publicApiUrl, apiKey, adminToken, accessToken }, issues: [] }
 }
 
 export function requireDashboardConfig(): DashboardConfig {

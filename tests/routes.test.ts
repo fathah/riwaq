@@ -1,13 +1,16 @@
 import { beforeAll, afterAll, describe, it, expect } from 'vitest'
 import { app } from '../src/index'
 import { migrate } from '../src/db/migrate'
-import { sql } from '../src/db/client'
+import { db, sql } from '../src/db/client'
+import { chunks, documents } from '../src/db/schema'
+import { createAndIngest, IngestQueueUnavailable } from '../src/routes/documents'
+import { desc, eq } from 'drizzle-orm'
 
-async function api(method: string, path: string, key?: string, body?: unknown) {
+async function api(method: string, path: string, key?: string, body?: unknown, extraHeaders: Record<string, string> = {}) {
   const res = await app.fetch(
     new Request(`http://localhost${path}`, {
       method,
-      headers: { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) },
+      headers: { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}), ...extraHeaders },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     }),
   )
@@ -16,11 +19,13 @@ async function api(method: string, path: string, key?: string, body?: unknown) {
 
 let key: string
 let agentId: string
+let orgId: string
 
 beforeAll(async () => {
   await migrate()
-  const org = (await api('POST', '/organizations', undefined, { name: 'routes-org' })).json
+  const org = (await api('POST', '/organizations', 'test-admin-token', { name: 'routes-org' })).json
   key = org.apiKey
+  orgId = org.id
   agentId = (await api('POST', '/agents', key, { name: 'r' })).json.agent.id
 })
 afterAll(async () => {
@@ -76,5 +81,74 @@ describe('first-party agent listing', () => {
     const res = await api('GET', '/agents', key)
     expect(res.status).toBe(200)
     expect(res.json).toEqual(expect.arrayContaining([expect.objectContaining({ id: agentId, name: 'r' })]))
+  })
+})
+
+describe('knowledge document inspection', () => {
+  it('returns document metadata and indexed text without embedding vectors', async () => {
+    const kbId = (await api('GET', `/agents/${agentId}/knowledge-bases`, key)).json[0].id
+    const [document] = await db
+      .insert(documents)
+      .values({ knowledgeBaseId: kbId, name: 'handbook.txt', source: 'text', status: 'ready' })
+      .returning({ id: documents.id })
+    await db.insert(chunks).values({
+      documentId: document!.id,
+      knowledgeBaseId: kbId,
+      content: 'Refunds are available within 30 days.',
+      embedding: [1, 0, 0, 0, 0, 0, 0, 0],
+      metadata: { index: 0 },
+    })
+
+    const res = await api('GET', `/knowledge-bases/${kbId}/documents/${document!.id}`, key)
+    expect(res.status).toBe(200)
+    expect(res.json.document).toMatchObject({ id: document!.id, name: 'handbook.txt', status: 'ready' })
+    expect(res.json.chunks).toEqual([expect.objectContaining({ content: 'Refunds are available within 30 days.' })])
+    expect(JSON.stringify(res.json)).not.toContain('embedding')
+  })
+
+  it('marks a document as failed when its ingestion job cannot be queued', async () => {
+    const kbId = (await api('GET', `/agents/${agentId}/knowledge-bases`, key)).json[0].id
+    await expect(
+      createAndIngest(orgId, kbId, 'queue failure', 'text', 'A short sentence.', async () => {
+        throw new Error('queue unavailable')
+      }),
+    ).rejects.toBeInstanceOf(IngestQueueUnavailable)
+
+    const [document] = await db
+      .select({ name: documents.name, status: documents.status })
+      .from(documents)
+      .where(eq(documents.knowledgeBaseId, kbId))
+      .orderBy(desc(documents.createdAt))
+      .limit(1)
+    expect(document).toEqual({ name: 'queue failure', status: 'error' })
+  })
+})
+
+describe('admin organization management', () => {
+  it('requires the configured admin token', async () => {
+    expect((await api('GET', '/admin/organizations')).status).toBe(401)
+  })
+
+  it('lists organizations without exposing API-key hashes', async () => {
+    const res = await api('GET', '/admin/organizations', 'test-admin-token')
+    expect(res.status).toBe(200)
+    expect(res.json).toEqual(expect.arrayContaining([expect.objectContaining({ id: orgId, name: 'routes-org' })]))
+    expect(JSON.stringify(res.json)).not.toContain('apiKeyHash')
+  })
+
+  it('allows admin-scoped organization selection without rotating its API key', async () => {
+    const res = await api('GET', '/organizations/me', undefined, undefined, {
+      'x-admin-token': 'test-admin-token',
+      'x-riwaq-organization-id': orgId,
+    })
+    expect(res.status).toBe(200)
+    expect(res.json).toMatchObject({ id: orgId, name: 'routes-org' })
+  })
+
+  it('renames an organization through the admin route', async () => {
+    const renamed = await api('PATCH', `/admin/organizations/${orgId}`, 'test-admin-token', { name: 'routes-org-renamed' })
+    expect(renamed.status).toBe(200)
+    expect(renamed.json.name).toBe('routes-org-renamed')
+    expect((await api('GET', '/organizations/me', key)).json.name).toBe('routes-org-renamed')
   })
 })

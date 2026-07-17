@@ -6,6 +6,7 @@ import { decryptSecret } from '../lib/crypto'
 import { cacheGet, cacheSet, cacheDel } from '../lib/cache'
 import { DEFAULT_MODEL, type LlmConfig, type Provider } from '../lib/llm'
 import { assertPublicUrl } from '../lib/url-guard'
+import { normalizeStoredProviderApiKey } from '../lib/provider-api-key'
 
 type AgentOverride = { provider: string | null; model: string | null }
 type OrgLlmRow = {
@@ -79,7 +80,8 @@ export async function resolveLlmConfig(orgId: string, agent?: AgentOverride): Pr
   // only when it actually applies to this call.
   const orgApiKey =
     orgApplies && org?.apiKey ? decryptSecret(org.apiKey, org.apiKeyEncrypted) : null
-  const apiKey = orgApiKey || (provider === 'openai' ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY)
+  const rawApiKey = orgApiKey || (provider === 'openai' ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY)
+  const apiKey = rawApiKey ? normalizeStoredProviderApiKey(rawApiKey) : rawApiKey
 
   // Re-resolve and revalidate tenant-controlled destinations immediately before
   // every provider call. This closes the stored-DNS drift window; production's

@@ -1,12 +1,13 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, asc, desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
-import { documents, knowledgeBases } from '../db/schema'
+import { chunks, documents, knowledgeBases } from '../db/schema'
 import { orgAuth } from '../middleware/auth'
 import { getAgentInOrg, getKbInOrg } from '../db/guards'
 import { parseToText } from '../lib/parse'
-import { enqueueIngest } from '../lib/queue'
+import { enqueueIngest, type IngestPayload } from '../lib/queue'
+import { markIngestFailed } from '../services/ingest'
 import { env } from '../env'
 import type { AppEnv } from '../types'
 import { assertStorageQuota, QuotaExceededError } from '../services/usage'
@@ -30,13 +31,27 @@ const MAX_NAME_LEN = 300
 
 class UploadTooLarge extends Error {}
 
+export class IngestQueueUnavailable extends Error {
+  constructor(readonly documentId: string) {
+    super('indexing queue unavailable')
+    this.name = 'IngestQueueUnavailable'
+  }
+}
+
 function capText(text: string): string {
   if (text.length > MAX_TEXT_CHARS) throw new UploadTooLarge(`document text exceeds ${MAX_TEXT_CHARS} characters`)
   return text
 }
 
 // Create a document row, kick off async ingestion, return immediately.
-async function createAndIngest(orgId: string, kbId: string, name: string, source: 'file' | 'text', text: string) {
+export async function createAndIngest(
+  orgId: string,
+  kbId: string,
+  name: string,
+  source: 'file' | 'text',
+  text: string,
+  enqueue: (payload: IngestPayload) => Promise<void> = enqueueIngest,
+) {
   await assertStorageQuota(orgId, text.length)
   const [doc] = await db
     .insert(documents)
@@ -45,7 +60,18 @@ async function createAndIngest(orgId: string, kbId: string, name: string, source
 
   // Durable enqueue (survives restart) when a queue is configured; otherwise runs
   // in-process. Awaited so the job is safely queued before we return 202.
-  await enqueueIngest({ documentId: doc!.id, knowledgeBaseId: kbId, text })
+  try {
+    await enqueue({ documentId: doc!.id, knowledgeBaseId: kbId, text })
+  } catch (err) {
+    // The source text only lives in the queued payload. If queueing fails, make
+    // the failure visible immediately instead of leaving an impossible-to-resume
+    // document in `processing` forever.
+    await markIngestFailed(doc!.id).catch((markErr) => {
+      console.error(`[ingest] failed to mark unqueued document ${doc!.id} as error`, markErr)
+    })
+    console.error(`[ingest] failed to enqueue document ${doc!.id}`, err)
+    throw new IngestQueueUnavailable(doc!.id)
+  }
   return doc!
 }
 
@@ -97,6 +123,9 @@ documentsRoute.post('/knowledge-bases/:kbId/documents', async (c) => {
     doc = await createAndIngest(orgId, kb.id, upload.name, upload.source, upload.text)
   } catch (err) {
     if (err instanceof QuotaExceededError) return c.json({ error: err.message }, 429)
+    if (err instanceof IngestQueueUnavailable) {
+      return c.json({ error: 'indexing service is unavailable; the document was marked as failed' }, 503)
+    }
     throw err
   }
   return c.json({ documentId: doc.id, name: doc.name, status: doc.status }, 202)
@@ -131,6 +160,9 @@ documentsRoute.post('/agents/:id/documents', async (c) => {
     doc = await createAndIngest(orgId, defaultKb.id, upload.name, upload.source, upload.text)
   } catch (err) {
     if (err instanceof QuotaExceededError) return c.json({ error: err.message }, 429)
+    if (err instanceof IngestQueueUnavailable) {
+      return c.json({ error: 'indexing service is unavailable; the document was marked as failed' }, 503)
+    }
     throw err
   }
   return c.json({ documentId: doc.id, name: doc.name, status: doc.status, knowledgeBaseId: defaultKb.id }, 202)
@@ -151,6 +183,44 @@ documentsRoute.get('/knowledge-bases/:kbId/documents', async (c) => {
     .limit(limit)
     .offset(offset)
   return c.json(rows)
+})
+
+// Inspect one document and the text chunks Riwaq actually searches. Embedding
+// vectors are intentionally excluded; callers only need the indexed knowledge.
+documentsRoute.get('/knowledge-bases/:kbId/documents/:docId', async (c) => {
+  const orgId = c.get('orgId')
+  const kb = await getKbInOrg(c.req.param('kbId'), orgId)
+  if (!kb) return c.json({ error: 'knowledge base not found' }, 404)
+
+  const docId = c.req.param('docId')
+  if (!isUuid(docId)) return c.json({ error: 'document not found' }, 404)
+
+  const [document] = await db
+    .select()
+    .from(documents)
+    .where(and(eq(documents.id, docId), eq(documents.knowledgeBaseId, kb.id)))
+    .limit(1)
+  if (!document) return c.json({ error: 'document not found' }, 404)
+
+  const { limit, offset } = pageParams((name) => c.req.query(name))
+  const rows = await db
+    .select({
+      id: chunks.id,
+      content: chunks.content,
+      metadata: chunks.metadata,
+      createdAt: chunks.createdAt,
+    })
+    .from(chunks)
+    .where(and(eq(chunks.documentId, document.id), eq(chunks.knowledgeBaseId, kb.id)))
+    .orderBy(asc(chunks.createdAt), asc(chunks.id))
+    .limit(limit + 1)
+    .offset(offset)
+
+  return c.json({
+    document,
+    chunks: rows.slice(0, limit),
+    page: { limit, offset, hasMore: rows.length > limit },
+  })
 })
 
 // Delete a document (cascades to its chunks).

@@ -14,6 +14,8 @@ import { env } from '../env'
 import { clearLlmClientCache } from '../lib/llm'
 import type { AppEnv } from '../types'
 import { getUsageSnapshot } from '../services/usage'
+import { adminAuth, hasValidAdminToken } from '../lib/admin-auth'
+import { InvalidProviderApiKeyError, normalizeProviderApiKey } from '../lib/provider-api-key'
 
 export const organizationsRoute = new Hono<AppEnv>()
 
@@ -30,9 +32,7 @@ function clientIp(c: { req: { header: (n: string) => string | undefined } }): st
 organizationsRoute.post('/organizations', async (c) => {
   // Admin gate: in production set ADMIN_TOKEN so signup isn't a public free-for-all.
   if (env.ADMIN_TOKEN) {
-    const header = c.req.header('authorization')
-    const provided = header?.startsWith('Bearer ') ? header.slice(7).trim() : c.req.header('x-admin-token')
-    if (provided !== env.ADMIN_TOKEN) return c.json({ error: 'admin token required to create organizations' }, 401)
+    if (!hasValidAdminToken(c)) return c.json({ error: 'admin token required to create organizations' }, 401)
   } else {
     // Open signup → cap abuse per IP.
     const rl = await checkRateLimit(`signup:${clientIp(c)}`, env.RATE_LIMIT_SIGNUP_PER_IP, env.RATE_LIMIT_WINDOW_SECONDS)
@@ -53,6 +53,44 @@ organizationsRoute.post('/organizations', async (c) => {
     .returning({ id: organizations.id, name: organizations.name, createdAt: organizations.createdAt })
 
   return c.json({ ...org!, apiKey }, 201)
+})
+
+// ADMIN: list and rename organizations without exposing API-key hashes or LLM
+// credentials. Admin-scoped organization selection is handled by orgAuth using
+// X-Riwaq-Organization-ID, so switching never rotates an integration's API key.
+organizationsRoute.get('/admin/organizations', adminAuth, async (c) => {
+  const rows = await db
+    .select({
+      id: organizations.id,
+      name: organizations.name,
+      createdAt: organizations.createdAt,
+      apiKeyPrefix: organizations.apiKeyPrefix,
+      llmProvider: organizations.llmProvider,
+      llmModel: organizations.llmModel,
+    })
+    .from(organizations)
+    .orderBy(organizations.createdAt)
+  return c.json(rows.map((org) => ({
+    id: org.id,
+    name: org.name,
+    createdAt: org.createdAt,
+    apiKeyPrefix: org.apiKeyPrefix,
+    llm: { provider: org.llmProvider, model: org.llmModel },
+  })))
+})
+
+const renameSchema = z.object({ name: z.string().min(1).max(200) })
+
+organizationsRoute.patch('/admin/organizations/:id', adminAuth, async (c) => {
+  const parsed = renameSchema.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
+  const [org] = await db
+    .update(organizations)
+    .set({ name: parsed.data.name })
+    .where(eq(organizations.id, c.req.param('id')))
+    .returning({ id: organizations.id, name: organizations.name, createdAt: organizations.createdAt })
+  if (!org) return c.json({ error: 'organization not found' }, 404)
+  return c.json(org)
 })
 
 // AUTHED: who am I? (Never echoes secrets — the org API key or the LLM key.)
@@ -184,7 +222,14 @@ organizationsRoute.put('/organizations/llm', orgAuth, async (c) => {
   if ('baseUrl' in parsed.data) patch.llmBaseUrl = parsed.data.baseUrl ?? null
   // Encrypt the tenant LLM key at rest (no-op passthrough when no master key is set).
   if ('apiKey' in parsed.data) {
-    patch.llmApiKey = parsed.data.apiKey ? encryptSecret(parsed.data.apiKey) : null
+    let apiKey = parsed.data.apiKey
+    try {
+      apiKey = apiKey ? normalizeProviderApiKey(apiKey) : null
+    } catch (err) {
+      if (err instanceof InvalidProviderApiKeyError) return c.json({ error: err.message }, 400)
+      throw err
+    }
+    patch.llmApiKey = apiKey ? encryptSecret(apiKey) : null
     patch.llmApiKeyEncrypted = parsed.data.apiKey ? encryptionEnabled() : false
   }
   if ('model' in parsed.data) patch.llmModel = parsed.data.model ?? null

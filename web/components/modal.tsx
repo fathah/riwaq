@@ -9,9 +9,10 @@ type ModalProps = {
   description: string
   children: ReactNode
   tone?: 'primary' | 'secondary'
+  onOpen?: () => void
 }
 
-export function Modal({ trigger, title, description, children, tone = 'primary' }: ModalProps) {
+export function Modal({ trigger, title, description, children, tone = 'primary', onOpen }: ModalProps) {
   const [open, setOpen] = useState(false)
   const dialogRef = useRef<HTMLDialogElement>(null)
   const titleId = useId()
@@ -25,7 +26,7 @@ export function Modal({ trigger, title, description, children, tone = 'primary' 
 
   return (
     <>
-      <button className={`button ${tone === 'primary' ? 'button-primary' : 'button-secondary'}`} type="button" onClick={() => setOpen(true)}>
+      <button className={`button ${tone === 'primary' ? 'button-primary' : 'button-secondary'}`} type="button" onClick={() => { onOpen?.(); setOpen(true) }}>
         {trigger} {tone === 'primary' ? <Icon name="plus" /> : null}
       </button>
       <dialog

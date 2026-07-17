@@ -1,6 +1,6 @@
-import { inArray, eq, sql, cosineDistance } from 'drizzle-orm'
+import { and, inArray, eq, or, sql, cosineDistance } from 'drizzle-orm'
 import { db } from '../db/client'
-import { agentKnowledgeBases, chunks, documents, knowledgeBases } from '../db/schema'
+import { agents, chunks, documents, knowledgeBases } from '../db/schema'
 import { env } from '../env'
 
 export type RetrievedChunk = {
@@ -13,12 +13,28 @@ export type RetrievedChunk = {
   similarity: number
 }
 
-/** The set of KB ids an agent can read = its private KB + every linked shared KB. */
+/**
+ * The set of KBs an agent can read = its private KB + every shared KB in its
+ * organization. "Shared" is intentionally organization-wide; requiring a hidden
+ * second link step made correctly indexed knowledge invisible to every agent.
+ */
 export async function resolveAgentKbIds(agentId: string): Promise<string[]> {
+  const [agent] = await db
+    .select({ orgId: agents.orgId })
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .limit(1)
+  if (!agent) return []
+
   const rows = await db
-    .select({ kbId: agentKnowledgeBases.knowledgeBaseId })
-    .from(agentKnowledgeBases)
-    .where(eq(agentKnowledgeBases.agentId, agentId))
+    .select({ kbId: knowledgeBases.id })
+    .from(knowledgeBases)
+    .where(
+      and(
+        eq(knowledgeBases.orgId, agent.orgId),
+        or(eq(knowledgeBases.isDefault, false), eq(knowledgeBases.agentId, agentId)),
+      ),
+    )
   return rows.map((r) => r.kbId)
 }
 

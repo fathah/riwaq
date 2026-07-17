@@ -8,6 +8,7 @@ import { serializeResult, createStreamSerializer, parseFormat } from '../seriali
 import type { AppEnv } from '../types'
 import { isProd } from '../env'
 import { verifyEndUserToken } from '../lib/end-user-token'
+import { InvalidProviderApiKeyError } from '../lib/provider-api-key'
 
 export const chatRoute = new Hono<AppEnv>()
 chatRoute.use('*', orgAuth)
@@ -36,7 +37,7 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : 'invalid end-user token' }, 401)
     }
-  } else if (isProd) {
+  } else if (isProd && !c.get('adminScoped')) {
     return c.json({ error: 'X-End-User-Token is required in production' }, 401)
   }
   if (!endUserId) return c.json({ error: 'endUserId is required' }, 400)
@@ -57,6 +58,7 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     prepared = await prepareChatTurn(input)
   } catch (err) {
     if (err instanceof ChatError) return c.json({ error: err.message }, err.status as 400 | 403 | 404 | 429)
+    if (err instanceof InvalidProviderApiKeyError) return c.json({ error: err.message }, 400)
     throw err
   }
 
@@ -74,6 +76,11 @@ chatRoute.post('/agents/:id/chat', async (c) => {
     })
   }
 
-  const result = await runPrepared(prepared)
-  return c.json(serializeResult(result, format, agent.id) as object)
+  try {
+    const result = await runPrepared(prepared)
+    return c.json(serializeResult(result, format, agent.id) as object)
+  } catch (err) {
+    console.error('[chat] model request failed', err)
+    return c.json({ error: 'Model request failed. Check the active organization’s LLM and embedding settings.' }, 502)
+  }
 })
