@@ -1,13 +1,83 @@
 import { and, desc, eq, isNull, notInArray, or, sql, cosineDistance } from 'drizzle-orm'
 import { db } from '../db/client'
 import { memories } from '../db/schema'
-import { embed } from '../lib/embeddings'
+import { embed, embedOne } from '../lib/embeddings'
 import { complete, type LlmConfig, type Usage } from '../lib/llm'
 import { env } from '../env'
 import { MEMORY_EXTRACT_SYSTEM, memoryExtractUser } from '../prompts/memory-extract'
 
 const RECALL_K = 5
 const DEDUP_SIMILARITY = 0.92 // near-identical facts are merged, not duplicated
+
+export type PublicMemory = {
+  id: string
+  endUserId: string | null
+  fact: string
+  updatedAt: Date
+}
+
+const publicMemorySelection = {
+  id: memories.id,
+  endUserId: memories.endUserId,
+  fact: memories.fact,
+  updatedAt: memories.updatedAt,
+}
+
+/** Operator-facing memory management. Embeddings are intentionally never part
+ * of the returned shape. Ownership is established by the route's agent guard. */
+export function listMemories(agentId: string, limit: number, offset: number): Promise<PublicMemory[]> {
+  return db
+    .select(publicMemorySelection)
+    .from(memories)
+    .where(eq(memories.agentId, agentId))
+    .orderBy(desc(memories.updatedAt))
+    .limit(limit)
+    .offset(offset)
+}
+
+export async function createMemory(input: {
+  agentId: string
+  endUserId: string | null
+  fact: string
+}): Promise<PublicMemory> {
+  const embedding = await embedOne(input.fact, 'document')
+  const [created] = await db
+    .insert(memories)
+    .values({ ...input, embedding })
+    .returning(publicMemorySelection)
+  if (input.endUserId !== null) await pruneMemories(input.agentId, input.endUserId)
+  return created!
+}
+
+export async function updateMemory(
+  agentId: string,
+  memoryId: string,
+  fact: string,
+): Promise<PublicMemory | null> {
+  const embedding = await embedOne(fact, 'document')
+  const [updated] = await db
+    .update(memories)
+    .set({ fact, embedding, updatedAt: new Date() })
+    .where(and(eq(memories.id, memoryId), eq(memories.agentId, agentId)))
+    .returning(publicMemorySelection)
+  return updated ?? null
+}
+
+export async function deleteMemory(agentId: string, memoryId: string): Promise<boolean> {
+  const deleted = await db
+    .delete(memories)
+    .where(and(eq(memories.id, memoryId), eq(memories.agentId, agentId)))
+    .returning({ id: memories.id })
+  return deleted.length > 0
+}
+
+export async function forgetUserMemories(agentId: string, endUserId: string): Promise<number> {
+  const deleted = await db
+    .delete(memories)
+    .where(and(eq(memories.agentId, agentId), eq(memories.endUserId, endUserId)))
+    .returning({ id: memories.id })
+  return deleted.length
+}
 
 /**
  * Top long-term memories to inject for THIS end user of an agent: facts learned

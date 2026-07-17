@@ -56,6 +56,13 @@ export type AgentChannel = {
   createdAt: string
 }
 
+export type AgentMemory = {
+  id: string
+  endUserId: string | null
+  fact: string
+  updatedAt: string
+}
+
 export type KnowledgeBase = {
   id: string
   name: string
@@ -219,6 +226,10 @@ export function getAgentChannels(agentId: string) {
   return request<AgentChannel[]>(`/agents/${encodeURIComponent(agentId)}/channels`)
 }
 
+export function getAgentMemories(agentId: string) {
+  return request<AgentMemory[]>(`/agents/${encodeURIComponent(agentId)}/memories?limit=200`)
+}
+
 export function getKnowledgeBases() {
   return request<KnowledgeBase[]>('/knowledge-bases?limit=200')
 }
@@ -261,6 +272,42 @@ export function createAgent(input: { name: string; systemPrompt?: string; provid
   return request('/agents', { method: 'POST', body: JSON.stringify(input) })
 }
 
+export function updateAgentInstructions(agentId: string, systemPrompt: string) {
+  return request<Agent>(`/agents/${encodeURIComponent(agentId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ systemPrompt }),
+  })
+}
+
+export function createAgentMemory(agentId: string, input: { fact: string; endUserId: string | null }) {
+  return request<AgentMemory>(`/agents/${encodeURIComponent(agentId)}/memories`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+    signal: AbortSignal.timeout(90_000),
+  })
+}
+
+export function updateAgentMemory(agentId: string, memoryId: string, fact: string) {
+  return request<AgentMemory>(`/agents/${encodeURIComponent(agentId)}/memories/${encodeURIComponent(memoryId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ fact }),
+    signal: AbortSignal.timeout(90_000),
+  })
+}
+
+export function deleteAgentMemory(agentId: string, memoryId: string) {
+  return request<{ ok: true }>(`/agents/${encodeURIComponent(agentId)}/memories/${encodeURIComponent(memoryId)}`, {
+    method: 'DELETE',
+  })
+}
+
+export function forgetAgentUser(agentId: string, endUserId: string) {
+  const query = new URLSearchParams({ endUserId })
+  return request<{ ok: true; deleted: number }>(`/agents/${encodeURIComponent(agentId)}/memories?${query}`, {
+    method: 'DELETE',
+  })
+}
+
 export function connectTelegram(agentId: string, token: string) {
   return request<AgentChannel>(`/agents/${encodeURIComponent(agentId)}/channels/telegram`, {
     method: 'POST',
@@ -270,7 +317,7 @@ export function connectTelegram(agentId: string, token: string) {
 }
 
 export function disconnectAgentChannel(agentId: string, channelId: string) {
-  return request<{ ok: true; webhookRemoved: boolean }>(
+  return request<{ ok: true }>(
     `/agents/${encodeURIComponent(agentId)}/channels/${encodeURIComponent(channelId)}`,
     { method: 'DELETE', signal: AbortSignal.timeout(20_000) },
   )

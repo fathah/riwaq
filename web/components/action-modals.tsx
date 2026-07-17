@@ -1,8 +1,8 @@
 'use client'
 
 import { useFormStatus } from 'react-dom'
-import { createAgentAction, createKnowledgeBaseAction, updateLlmAction } from '../app/actions'
-import type { Organization } from '../lib/riwaq'
+import { createAgentAction, createKnowledgeBaseAction, updateAgentInstructionsAction, updateLlmAction } from '../app/actions'
+import type { Agent, Organization } from '../lib/riwaq'
 import { Modal } from './modal'
 
 function SubmitButton({ label }: { label: string }) {
@@ -21,6 +21,29 @@ export function CreateAgentModal() {
           <label><span>Model</span><input name="model" placeholder="Inherit default" /></label>
         </div>
         <footer className="modal-actions"><span>Agent settings can inherit the organization LLM.</span><SubmitButton label="Create agent" /></footer>
+      </form>
+    </Modal>
+  )
+}
+
+export function EditAgentInstructionsModal({ agent }: { agent: Agent }) {
+  return (
+    <Modal tone="secondary" trigger="Edit instructions" title="Agent instructions" description="These instructions apply to the console, API, Telegram, and every future messaging channel.">
+      <form action={updateAgentInstructionsAction} className="modal-form">
+        <input name="agentId" type="hidden" value={agent.id} />
+        <label>
+          <span>System prompt</span>
+          <textarea
+            name="systemPrompt"
+            rows={9}
+            maxLength={20000}
+            defaultValue={agent.systemPrompt}
+            placeholder="Answer in no more than 50 words. Be concise and professional."
+            autoFocus
+          />
+          <small>Use this for tone, response length, role, language, or other persistent behavior. Clear it to use only Riwaq’s defaults.</small>
+        </label>
+        <footer className="modal-actions"><span>Changes apply from the next message.</span><SubmitButton label="Save instructions" /></footer>
       </form>
     </Modal>
   )

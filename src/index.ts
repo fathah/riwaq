@@ -24,7 +24,9 @@ import { operations, operationalMetrics } from './middleware/operations'
 import { getRedis } from './lib/redis'
 import { openApiDocument } from './openapi'
 import { ChatError } from './services/chat'
-import { channelsRoute, channelWebhooksRoute } from './routes/channels'
+import { channelsRoute } from './routes/channels'
+import { startTelegramPolling, stopTelegramPolling } from './services/telegram-polling'
+import { memoriesRoute } from './routes/memories'
 
 export const app = new Hono<AppEnv>()
 
@@ -76,9 +78,6 @@ app.get('/metrics', async (c) => {
 
 // Each sub-app applies org-auth internally (except the public POST /organizations).
 // All are mounted at root and declare absolute paths.
-// Provider webhooks must be mounted before org-auth wildcard middleware from the
-// protected sub-apps; they authenticate with provider-specific secret headers.
-app.route('/', channelWebhooksRoute)
 app.route('/', organizationsRoute)
 app.route('/', agentsRoute)
 app.route('/', knowledgeBasesRoute)
@@ -90,6 +89,7 @@ app.route('/', analyticsRoute)
 app.route('/', learningRoute)
 app.route('/', remindersRoute)
 app.route('/', channelsRoute)
+app.route('/', memoriesRoute)
 
 // Map a thrown error to an HTTP status. ChatError carries its own; provider SDK
 // errors expose a numeric `status`; a Postgres UUID cast error is a client 400;
@@ -119,6 +119,10 @@ async function main() {
   // Durable job workers (no-op unless REDIS_URL is set).
   startWorkers()
   console.log(`[riwaq] durable jobs: ${redisEnabled ? 'DragonflyDB/Redis' : 'in-process fallback'}`)
+
+  // Telegram uses outbound long polling: no public URL, reverse proxy, or extra
+  // gateway container is needed. Advisory locks make this multi-replica safe.
+  await startTelegramPolling()
 
   // Reminder scheduler: polls due reminders and fires signed webhooks. Multi-node
   // safe (FOR UPDATE SKIP LOCKED), so every replica may run it.
@@ -157,8 +161,9 @@ async function main() {
     } finally {
       if (forceTimer) clearTimeout(forceTimer)
     }
-    // Stop the reminder poller, then workers (finish in-flight jobs), then DB/Redis.
+    // Stop inbound pollers, then workers (finish in-flight jobs), then DB/Redis.
     stopReminderScheduler()
+    await stopTelegramPolling().catch((err) => console.error('[riwaq] error stopping Telegram polling', err))
     await closeQueues().catch((err) => console.error('[riwaq] error closing queues', err))
     try {
       await sql.end({ timeout: 5 })

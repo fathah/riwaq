@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { and, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { agentChannels, agents, channelEvents, channelSessions, conversations } from '../db/schema'
@@ -6,14 +6,12 @@ import { decryptSecret, encryptSecret, encryptionEnabled } from '../lib/crypto'
 import {
   deleteTelegramWebhook,
   getTelegramBot,
+  renderTelegramMarkdown,
   sendTelegramMessage,
-  sendTelegramTyping,
-  setTelegramWebhook,
-  splitTelegramText,
+  startTelegramTyping,
   telegramUpdateSchema,
   type TelegramUpdate,
 } from '../lib/telegram'
-import { env } from '../env'
 import { prepareChatTurn, runPrepared } from './chat'
 
 export class ChannelError extends Error {
@@ -46,32 +44,6 @@ const publicSelection = {
   createdAt: agentChannels.createdAt,
 }
 
-function hashWebhookSecret(secret: string): string {
-  return createHash('sha256').update(secret).digest('base64url')
-}
-
-function matchesWebhookSecret(provided: string, expectedHash: string): boolean {
-  const actual = Buffer.from(hashWebhookSecret(provided))
-  const expected = Buffer.from(expectedHash)
-  return actual.length === expected.length && timingSafeEqual(actual, expected)
-}
-
-function telegramWebhookUrl(channelId: string): string {
-  const raw = env.RIWAQ_PUBLIC_API_URL.trim()
-  if (!raw) throw new ChannelError('RIWAQ_PUBLIC_API_URL must be set before connecting Telegram')
-  let url: URL
-  try {
-    url = new URL(raw)
-  } catch {
-    throw new ChannelError('RIWAQ_PUBLIC_API_URL must be a valid public HTTPS URL')
-  }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-    throw new ChannelError('RIWAQ_PUBLIC_API_URL must be a public HTTPS URL without credentials, query, or fragment')
-  }
-  url.pathname = `${url.pathname.replace(/\/$/, '')}/webhooks/telegram/${channelId}`
-  return url.toString()
-}
-
 export async function listChannels(orgId: string, agentId?: string): Promise<PublicChannel[]> {
   return db
     .select(publicSelection)
@@ -97,15 +69,13 @@ export async function connectTelegramChannel(input: {
     .limit(1)
   if (existing) throw new ChannelError('This agent already has a Telegram bot. Disconnect it before adding another.', 409)
 
-  const channelId = randomUUID()
-  const webhookUrl = telegramWebhookUrl(channelId)
   let bot
   try {
     bot = await getTelegramBot(token)
   } catch {
     throw new ChannelError('Telegram rejected this bot token. Copy only the raw token from BotFather.')
   }
-  const webhookSecret = randomBytes(32).toString('base64url')
+  const channelId = randomUUID()
   const credentialEncrypted = encryptionEnabled()
 
   try {
@@ -119,7 +89,6 @@ export async function connectTelegramChannel(input: {
       externalUsername: bot.username ?? null,
       credential: encryptSecret(token),
       credentialEncrypted,
-      webhookSecretHash: hashWebhookSecret(webhookSecret),
       status: 'connecting',
     })
   } catch (error) {
@@ -130,10 +99,12 @@ export async function connectTelegramChannel(input: {
   }
 
   try {
-    await setTelegramWebhook(token, webhookUrl, webhookSecret)
+    // getUpdates and webhooks are mutually exclusive. Clear a webhook left by
+    // an older Riwaq release before the local polling supervisor claims the bot.
+    await deleteTelegramWebhook(token)
   } catch (error) {
     await db.delete(agentChannels).where(eq(agentChannels.id, channelId)).catch(() => {})
-    throw new ChannelError(error instanceof Error ? error.message : 'Telegram webhook registration failed', 502)
+    throw new ChannelError(error instanceof Error ? error.message : 'Telegram polling setup failed', 502)
   }
 
   const [connected] = await db
@@ -141,6 +112,9 @@ export async function connectTelegramChannel(input: {
     .set({ status: 'active', lastError: null, updatedAt: new Date() })
     .where(eq(agentChannels.id, channelId))
     .returning(publicSelection)
+  // A running server can pick up the new channel immediately. The dynamic
+  // import avoids a channels ↔ polling module initialization cycle.
+  void import('./telegram-polling').then(({ reconcileTelegramPollers }) => reconcileTelegramPollers()).catch(() => {})
   return connected!
 }
 
@@ -156,34 +130,27 @@ export async function disconnectChannel(input: { orgId: string; agentId: string;
     .limit(1)
   if (!channel) throw new ChannelError('Channel not found', 404)
 
-  let webhookRemoved = true
   if (channel.provider === 'telegram') {
-    try {
-      await deleteTelegramWebhook(decryptSecret(channel.credential, channel.credentialEncrypted))
-    } catch {
-      // A revoked token must not trap an operator in a connection they cannot remove.
-      webhookRemoved = false
-    }
+    await import('./telegram-polling')
+      .then(({ stopTelegramChannelPolling }) => stopTelegramChannelPolling(channel.id))
+      .catch(() => {})
   }
   await db.delete(agentChannels).where(eq(agentChannels.id, channel.id))
-  return { ok: true as const, webhookRemoved }
+  void import('./telegram-polling').then(({ reconcileTelegramPollers }) => reconcileTelegramPollers()).catch(() => {})
+  return { ok: true as const }
 }
 
-/** Validate and idempotently persist a Telegram webhook. The caller enqueues the
- * returned event ID and can acknowledge Telegram immediately. */
-export async function acceptTelegramUpdate(
+/** Idempotently persist an update fetched by the trusted polling supervisor. */
+export async function recordTelegramUpdate(
   channelId: string,
-  secret: string,
   body: unknown,
 ): Promise<{ eventId: string; shouldEnqueue: boolean }> {
   const [channel] = await db
-    .select({ id: agentChannels.id, secretHash: agentChannels.webhookSecretHash })
+    .select({ id: agentChannels.id })
     .from(agentChannels)
     .where(and(eq(agentChannels.id, channelId), eq(agentChannels.provider, 'telegram'), eq(agentChannels.status, 'active')))
     .limit(1)
-  if (!channel || !secret || !matchesWebhookSecret(secret, channel.secretHash)) {
-    throw new ChannelError('Webhook not found', 404)
-  }
+  if (!channel) throw new ChannelError('Telegram channel not found', 404)
 
   const parsed = telegramUpdateSchema.safeParse(body)
   if (!parsed.success) throw new ChannelError('Invalid Telegram update')
@@ -199,7 +166,7 @@ export async function acceptTelegramUpdate(
     .where(eq(agentChannels.id, channelId))
   if (event) return { eventId: event.id, shouldEnqueue: true }
 
-  // If queueing failed after the first insert, Telegram's retry must recover the
+  // If queueing failed after the first insert, a repeated poll must recover the
   // existing pending/error event instead of acknowledging it without a job.
   const [existing] = await db
     .select({ id: channelEvents.id, status: channelEvents.status })
@@ -317,21 +284,28 @@ export async function processChannelEvent(eventId: string): Promise<void> {
       } else if (!message.text) {
         responseText = 'I can currently respond to text messages. Support for more message types is coming later.'
       } else {
-        await sendTelegramTyping(token, externalChatId, message.message_thread_id).catch(() => {})
-        const conversationId = await conversationForChannel({
-          channelId: row.channel.id,
-          agentId: row.agent.id,
-          externalChatId,
-          externalUserId,
-          endUserId,
+        const typing = startTelegramTyping(token, {
+          chatId: externalChatId,
+          messageThreadId: message.message_thread_id,
         })
-        const prepared = await prepareChatTurn({
-          agent: row.agent,
-          endUserId,
-          message: message.text,
-          conversationId,
-        })
-        responseText = (await runPrepared(prepared)).answer
+        try {
+          const conversationId = await conversationForChannel({
+            channelId: row.channel.id,
+            agentId: row.agent.id,
+            externalChatId,
+            externalUserId,
+            endUserId,
+          })
+          const prepared = await prepareChatTurn({
+            agent: row.agent,
+            endUserId,
+            message: message.text,
+            conversationId,
+          })
+          responseText = (await runPrepared(prepared)).answer
+        } finally {
+          await typing.stop()
+        }
       }
       await db
         .update(channelEvents)
@@ -344,11 +318,13 @@ export async function processChannelEvent(eventId: string): Promise<void> {
       .from(channelEvents)
       .where(eq(channelEvents.id, eventId))
       .limit(1)
-    const parts = splitTelegramText(responseText)
+    const parts = renderTelegramMarkdown(responseText)
     for (let index = fresh?.sentPartCount ?? 0; index < parts.length; index += 1) {
       await sendTelegramMessage(token, {
         chatId: externalChatId,
-        text: parts[index]!,
+        text: parts[index]!.html,
+        parseMode: 'HTML',
+        fallbackText: parts[index]!.plainText,
         messageThreadId: message.message_thread_id,
       })
       await db.update(channelEvents).set({ sentPartCount: index + 1 }).where(eq(channelEvents.id, eventId))

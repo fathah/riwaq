@@ -11,7 +11,7 @@ describe('OpenAPI contract', () => {
       paths: Record<string, unknown>
     }
     expect(spec.openapi).toBe('3.1.0')
-    expect(spec.info.version).toBe('1.3.0')
+    expect(spec.info.version).toBe('1.4.0')
 
     // Chat surfaces (native + OpenAI-compatible).
     expect(spec.paths['/agents/{id}/chat']).toBeDefined()
@@ -30,7 +30,8 @@ describe('OpenAPI contract', () => {
       '/agents/{id}/reminders/{rid}',
       '/channels',
       '/agents/{id}/channels/telegram',
-      '/webhooks/telegram/{channelId}',
+      '/agents/{id}/memories',
+      '/agents/{id}/memories/{memoryId}',
     ]) {
       expect(spec.paths[path], `missing ${path}`).toBeDefined()
     }

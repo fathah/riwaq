@@ -4,8 +4,13 @@ import { migrate } from '../src/db/migrate'
 import { db, sql } from '../src/db/client'
 import { agentChannels, channelEvents } from '../src/db/schema'
 import { eq } from 'drizzle-orm'
-import { splitTelegramText } from '../src/lib/telegram'
-import { acceptTelegramUpdate } from '../src/services/channels'
+import {
+  renderTelegramMarkdown,
+  sendTelegramMessage,
+  startTelegramTyping,
+} from '../src/lib/telegram'
+import { recordTelegramUpdate } from '../src/services/channels'
+import { startTelegramPolling, stopTelegramPolling } from '../src/services/telegram-polling'
 
 async function api(method: string, path: string, key?: string, body?: unknown, headers: Record<string, string> = {}) {
   const response = await app.fetch(new Request(`http://localhost${path}`, {
@@ -24,8 +29,9 @@ const token = '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 let key: string
 let agentId: string
 let channelId: string
-let webhookSecret: string
 const telegramCalls: Array<{ method: string; body: Record<string, any> }> = []
+const pendingUpdates: Array<Record<string, unknown>> = []
+let rejectNextFormattedMessage = false
 
 beforeAll(async () => {
   await migrate()
@@ -37,6 +43,17 @@ beforeAll(async () => {
     if (method === 'getMe') {
       return Response.json({ ok: true, result: { id: 9001, is_bot: true, first_name: 'Riwaq Test', username: 'riwaq_test_bot' } })
     }
+    if (method === 'getUpdates') {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return Response.json({ ok: true, result: pendingUpdates.splice(0) })
+    }
+    if (method === 'sendMessage' && body.parse_mode === 'HTML' && rejectNextFormattedMessage) {
+      rejectNextFormattedMessage = false
+      return Response.json(
+        { ok: false, error_code: 400, description: "Bad Request: can't parse entities" },
+        { status: 400 },
+      )
+    }
     return Response.json({ ok: true, result: true })
   }))
 
@@ -46,12 +63,13 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  await stopTelegramPolling()
   vi.unstubAllGlobals()
   await sql.end({ timeout: 5 })
 })
 
 describe('Telegram channel management', () => {
-  it('verifies the bot, registers a secret webhook, and never returns credentials', async () => {
+  it('verifies the bot, clears stale webhooks, and never returns credentials', async () => {
     const response = await api('POST', `/agents/${agentId}/channels/telegram`, key, { token })
     expect(response.status).toBe(201)
     expect(response.json).toMatchObject({ agentId, provider: 'telegram', externalUsername: 'riwaq_test_bot', status: 'active' })
@@ -59,11 +77,8 @@ describe('Telegram channel management', () => {
     expect(JSON.stringify(response.json)).not.toContain('credential')
     channelId = response.json.id
 
-    const setWebhook = telegramCalls.find((call) => call.method === 'setWebhook')
-    expect(setWebhook?.body.url).toBe(`https://riwaq.test/webhooks/telegram/${channelId}`)
-    expect(setWebhook?.body.allowed_updates).toEqual(['message'])
-    webhookSecret = setWebhook?.body.secret_token
-    expect(webhookSecret).toMatch(/^[A-Za-z0-9_-]{40,}$/)
+    expect(telegramCalls.some((call) => call.method === 'deleteWebhook')).toBe(true)
+    expect(telegramCalls.some((call) => call.method === 'setWebhook')).toBe(false)
 
     const listed = await api('GET', '/channels', key)
     expect(listed.status).toBe(200)
@@ -77,52 +92,114 @@ describe('Telegram channel management', () => {
     expect(stored?.credential).not.toContain(token)
   })
 
-  it('rejects an invalid secret without revealing the connection', async () => {
-    const response = await api('POST', `/webhooks/telegram/${channelId}`, undefined, { update_id: 100 }, {
-      'x-telegram-bot-api-secret-token': 'wrong-secret',
+  it('receives messages through outbound polling and runs the canonical channel worker', async () => {
+    pendingUpdates.push({
+      update_id: 101,
+      message: {
+        message_id: 501,
+        text: '/help',
+        from: { id: 42, is_bot: false, first_name: 'Local User' },
+        chat: { id: 42, type: 'private' },
+      },
     })
-    expect(response.status).toBe(404)
+    await startTelegramPolling()
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const [event] = await db
+        .select({ status: channelEvents.status })
+        .from(channelEvents)
+        .where(eq(channelEvents.providerEventId, '101'))
+      if (event?.status === 'processed') break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    await stopTelegramPolling()
+
+    const [event] = await db.select().from(channelEvents).where(eq(channelEvents.providerEventId, '101'))
+    expect(event?.status).toBe('processed')
+    expect(event?.responseText).toContain('powered by Riwaq')
+    expect(telegramCalls.some((call) => call.method === 'getUpdates')).toBe(true)
+    expect(telegramCalls.some((call) => call.method === 'sendMessage' && call.body.parse_mode === 'HTML')).toBe(true)
   })
 
-  it('allows a provider retry to recover an event that was stored but not queued', async () => {
-    const first = await acceptTelegramUpdate(channelId, webhookSecret, { update_id: 102 })
-    const retry = await acceptTelegramUpdate(channelId, webhookSecret, { update_id: 102 })
+  it('allows a repeated poll to recover an event that was stored but not queued', async () => {
+    const first = await recordTelegramUpdate(channelId, { update_id: 102 })
+    const retry = await recordTelegramUpdate(channelId, { update_id: 102 })
     expect(retry).toEqual({ eventId: first.eventId, shouldEnqueue: true })
     await db.delete(channelEvents).where(eq(channelEvents.id, first.eventId))
   })
 
-  it('deduplicates retried Telegram updates before queue processing', async () => {
-    const headers = { 'x-telegram-bot-api-secret-token': webhookSecret }
-    expect((await api('POST', `/webhooks/telegram/${channelId}`, undefined, { update_id: 101 }, headers)).status).toBe(200)
-    expect((await api('POST', `/webhooks/telegram/${channelId}`, undefined, { update_id: 101 }, headers)).status).toBe(200)
-
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      const [event] = await db
-        .select({ status: channelEvents.status })
-        .from(channelEvents)
-        .where(eq(channelEvents.channelId, channelId))
-      if (event?.status === 'processed') break
-      await new Promise((resolve) => setTimeout(resolve, 10))
-    }
-    const events = await db.select().from(channelEvents).where(eq(channelEvents.channelId, channelId))
+  it('deduplicates Telegram update IDs', async () => {
+    const first = await recordTelegramUpdate(channelId, { update_id: 103 })
+    const retry = await recordTelegramUpdate(channelId, { update_id: 103 })
+    expect(retry.eventId).toBe(first.eventId)
+    const events = await db.select().from(channelEvents).where(eq(channelEvents.providerEventId, '103'))
     expect(events).toHaveLength(1)
-    expect(events[0]?.status).toBe('processed')
+    await db.delete(channelEvents).where(eq(channelEvents.id, first.eventId))
   })
 
-  it('removes the Telegram webhook and local connection', async () => {
+  it('stops polling and removes the local connection', async () => {
     const response = await api('DELETE', `/agents/${agentId}/channels/${channelId}`, key)
-    expect(response).toEqual({ status: 200, json: { ok: true, webhookRemoved: true } })
+    expect(response).toEqual({ status: 200, json: { ok: true } })
     expect(telegramCalls.some((call) => call.method === 'deleteWebhook')).toBe(true)
     expect(await db.select().from(agentChannels).where(eq(agentChannels.id, channelId))).toHaveLength(0)
   })
 })
 
 describe('Telegram answer framing', () => {
+  it('refreshes the typing action until processing stops', async () => {
+    const before = telegramCalls.filter((call) => call.method === 'sendChatAction').length
+    const typing = startTelegramTyping(token, { chatId: '42', refreshMs: 10 })
+    await new Promise((resolve) => setTimeout(resolve, 35))
+    await typing.stop()
+    const afterStop = telegramCalls.filter((call) => call.method === 'sendChatAction').length
+    await new Promise((resolve) => setTimeout(resolve, 25))
+
+    expect(afterStop - before).toBeGreaterThanOrEqual(2)
+    expect(telegramCalls.filter((call) => call.method === 'sendChatAction')).toHaveLength(afterStop)
+  })
+
   it('splits long answers within Telegram limits without losing content', () => {
     const text = `${'a'.repeat(3000)}\n${'b'.repeat(3000)}`
-    const parts = splitTelegramText(text)
+    const parts = renderTelegramMarkdown(text)
     expect(parts.length).toBe(2)
-    expect(parts.every((part) => Array.from(part).length <= 4000)).toBe(true)
-    expect(parts.join('\n')).toBe(text)
+    expect(parts.every((part) => Array.from(part.plainText).length <= 3900)).toBe(true)
+    expect(parts.map((part) => part.plainText).join('\n')).toBe(text)
+  })
+
+  it('renders canonical Markdown as safe Telegram HTML', () => {
+    const [part] = renderTelegramMarkdown([
+      '## Tech Stack',
+      '',
+      '- **Web:** Next.js',
+      '- Use `<unsafe>` and [docs](https://example.com)',
+      '',
+      '```ts',
+      'const value = a < b',
+      '```',
+    ].join('\n'))
+
+    expect(part?.html).toContain('<b>Tech Stack</b>')
+    expect(part?.html).toContain('• <b>Web:</b> Next.js')
+    expect(part?.html).toContain('<code>&lt;unsafe&gt;</code>')
+    expect(part?.html).toContain('<a href="https://example.com">docs</a>')
+    expect(part?.html).toContain('<pre>const value = a &lt; b</pre>')
+    expect(part?.plainText).not.toContain('**')
+    expect(part?.plainText).not.toContain('##')
+  })
+
+  it('retries as plain text when Telegram rejects formatted HTML', async () => {
+    const before = telegramCalls.length
+    rejectNextFormattedMessage = true
+    await sendTelegramMessage(token, {
+      chatId: '42',
+      text: '<b>Hello</b>',
+      parseMode: 'HTML',
+      fallbackText: 'Hello',
+    })
+    const calls = telegramCalls.slice(before).filter((call) => call.method === 'sendMessage')
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.body).toMatchObject({ text: '<b>Hello</b>', parse_mode: 'HTML' })
+    expect(calls[1]?.body).toMatchObject({ text: 'Hello' })
+    expect(calls[1]?.body).not.toHaveProperty('parse_mode')
   })
 })

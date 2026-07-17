@@ -51,23 +51,20 @@ Two features build on those signals:
 
 ### Telegram bots
 
-Set `RIWAQ_PUBLIC_API_URL` to the API's externally reachable HTTPS origin, restart
-Riwaq, then open **Agents → Connect Telegram** in the console. Create a bot with
-`@BotFather`, paste its raw token, and Riwaq verifies the bot and registers a secret-
-protected webhook automatically.
+Open **Agents → Connect Telegram** in the console. Create a bot with `@BotFather`
+and paste its raw token. Riwaq connects through outbound long polling, so it works
+from localhost, Docker, private networks, and hosts behind NAT without a public URL,
+TLS certificate, reverse proxy, or additional gateway service.
 
 Every Telegram message enters the canonical agent chat service, so answers and
 learning stay consistent with the Playground and HTTP API. End-user memory remains
 safe: Telegram users are scoped as `telegram:<user-id>`, and group participants do
 not share conversation history. `/new` starts a fresh conversation.
 
-```env
-RIWAQ_PUBLIC_API_URL=https://riwaq.example.com
-```
-
 The bot token is never returned by the API and is encrypted at rest when
-`SECRET_ENCRYPTION_KEY` is configured. Webhook deliveries are deduplicated before
-being handed to the durable channel worker. WhatsApp and other providers can be
+`SECRET_ENCRYPTION_KEY` is configured. Telegram updates are deduplicated before
+being handed to the durable channel worker. A PostgreSQL advisory lock ensures only
+one Riwaq replica polls each bot. WhatsApp and other providers can be
 added as adapters over the same `agent_channels` and canonical chat layer.
 
 **Isolation by default, sharing by opt-in:**
@@ -440,6 +437,11 @@ Webhook payload:
 | PUT    | `/organizations/learning`                 | set self-learning auto-promote threshold `{ autoPromoteThreshold }`               |
 | PUT    | `/organizations/webhook`                  | set reminder webhook `{ url, secret? }`; returns signing secret once (null clears) |
 | POST   | `/agents`                                 | `{ name, systemPrompt?, provider?, model? }`; auto-creates the agent's private KB |
+| PATCH  | `/agents/:id`                             | update persistent agent instructions with `{ systemPrompt }`; empty clears custom instructions |
+| GET    | `/agents/:id/memories`                    | list long-term memories without exposing embedding vectors |
+| POST   | `/agents/:id/memories`                    | add `{ fact, endUserId? }`; omit/null identity for agent-wide memory |
+| PATCH  | `/agents/:id/memories/:memoryId`          | edit a memory and regenerate its embedding |
+| DELETE | `/agents/:id/memories/:memoryId`          | delete one memory |
 | GET    | `/agents`                                 | list the organization's agents (paginated)                                       |
 | GET    | `/agents/:id`                             | agent + linked KBs                                                                |
 | POST   | `/knowledge-bases`                        | create a shared KB                                                                |

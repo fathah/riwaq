@@ -19,7 +19,7 @@ export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Riwaq API',
-    version: '1.3.0',
+    version: '1.4.0',
     description:
       'Multi-tenant AI agent infrastructure: RAG + per-agent memory + question analytics, ' +
       'a per-org self-learning loop, scheduled reminders with signed webhooks, and an ' +
@@ -30,6 +30,7 @@ export const openApiDocument = {
     { name: 'Organizations' },
     { name: 'Admin' },
     { name: 'Agents' },
+    { name: 'Memory' },
     { name: 'Knowledge' },
     { name: 'Chat' },
     { name: 'OpenAI-compatible' },
@@ -118,6 +119,23 @@ export const openApiDocument = {
           systemPrompt: { type: 'string' },
           provider: { type: 'string', enum: ['anthropic', 'openai'] },
           model: { type: 'string' },
+        },
+      },
+      UpdateAgentRequest: {
+        type: 'object',
+        required: ['systemPrompt'],
+        properties: {
+          systemPrompt: { type: 'string', maxLength: 20000, description: 'Operator instructions. Send an empty string to restore Riwaq defaults.' },
+        },
+      },
+      Memory: {
+        type: 'object',
+        required: ['id', 'endUserId', 'fact', 'updatedAt'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          endUserId: { type: ['string', 'null'], description: 'Null means agent-wide; otherwise isolated to this end-user identity.' },
+          fact: { type: 'string', maxLength: 1000 },
+          updatedAt: { type: 'string', format: 'date-time' },
         },
       },
       LearningReport: {
@@ -313,6 +331,55 @@ export const openApiDocument = {
     },
     '/agents/{id}': {
       get: { tags: ['Agents'], summary: 'Agent + linked KBs + effectiveLlm', security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '200': { description: 'Agent' }, '404': { description: 'Not found' } } },
+      patch: {
+        tags: ['Agents'],
+        summary: 'Update an agent’s operator instructions',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/UpdateAgentRequest' } } } },
+        responses: { '200': { description: 'Updated agent' }, '400': { description: 'Invalid instructions' }, '404': { description: 'Agent not found' } },
+      },
+    },
+    '/agents/{id}/memories': {
+      get: {
+        tags: ['Memory'],
+        summary: 'List an agent’s long-term memories without embedding vectors',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam, ...pageParams],
+        responses: { '200': { description: 'Memories', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Memory' } } } } }, '404': { description: 'Agent not found' } },
+      },
+      post: {
+        tags: ['Memory'],
+        summary: 'Add an agent-wide or end-user memory and generate its embedding',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['fact'], properties: { fact: { type: 'string', minLength: 1, maxLength: 1000 }, endUserId: { type: ['string', 'null'], maxLength: 500 } } } } } },
+        responses: { '201': { description: 'Created', content: { 'application/json': { schema: { $ref: '#/components/schemas/Memory' } } } }, '400': { description: 'Invalid memory' }, '404': { description: 'Agent not found' } },
+      },
+      delete: {
+        tags: ['Memory'],
+        summary: 'Forget every memory for one end user',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam, { name: 'endUserId', in: 'query', required: true, schema: { type: 'string', minLength: 1, maxLength: 500 } }],
+        responses: { '200': { description: 'Deleted count' }, '400': { description: 'Missing endUserId' }, '404': { description: 'Agent not found' } },
+      },
+    },
+    '/agents/{id}/memories/{memoryId}': {
+      patch: {
+        tags: ['Memory'],
+        summary: 'Edit a memory and regenerate its embedding',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam, { name: 'memoryId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['fact'], properties: { fact: { type: 'string', minLength: 1, maxLength: 1000 } } } } } },
+        responses: { '200': { description: 'Updated', content: { 'application/json': { schema: { $ref: '#/components/schemas/Memory' } } } }, '404': { description: 'Memory not found' } },
+      },
+      delete: {
+        tags: ['Memory'],
+        summary: 'Delete one memory',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam, { name: 'memoryId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: { '200': { description: 'Deleted' }, '404': { description: 'Memory not found' } },
+      },
     },
 
     // --- Messaging channels ---
@@ -325,18 +392,15 @@ export const openApiDocument = {
     '/agents/{id}/channels/telegram': {
       post: {
         tags: ['Channels'],
-        summary: 'Verify a Telegram bot token and register its Riwaq webhook',
+        summary: 'Verify a Telegram bot token and connect it through outbound polling',
         security: [{ orgApiKey: [] }],
         parameters: [agentIdParam],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['token'], properties: { token: { type: 'string', writeOnly: true } } } } } },
-        responses: { '201': { description: 'Connected; token omitted from response' }, '400': { description: 'Invalid token or public URL' }, '409': { description: 'Agent or bot is already connected' }, '502': { description: 'Telegram webhook registration failed' } },
+        responses: { '201': { description: 'Connected; token omitted from response' }, '400': { description: 'Invalid token' }, '409': { description: 'Agent or bot is already connected' }, '502': { description: 'Telegram polling setup failed' } },
       },
     },
     '/agents/{id}/channels/{channelId}': {
-      delete: { tags: ['Channels'], summary: 'Remove a messaging connection and its provider webhook', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Disconnected' }, '404': { description: 'Channel not found' } } },
-    },
-    '/webhooks/telegram/{channelId}': {
-      post: { tags: ['Channels'], summary: 'Telegram delivery endpoint (authenticated with Telegram secret-token header)', parameters: [{ name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Accepted or already received' }, '404': { description: 'Unknown connection or invalid secret' } } },
+      delete: { tags: ['Channels'], summary: 'Stop polling and remove a messaging connection', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Disconnected' }, '404': { description: 'Channel not found' } } },
     },
 
     // --- Knowledge bases + documents ---

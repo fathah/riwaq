@@ -19,7 +19,6 @@ export default defineConfig({
       END_USER_SIGNING_SECRET: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
       ADMIN_TOKEN: 'test-admin-token',
       LLM_ALLOWED_HOSTS: '',
-      RIWAQ_PUBLIC_API_URL: 'https://riwaq.test',
       // The suite creates many orgs/requests from one "IP"; don't rate-limit tests.
       RATE_LIMIT_PER_ORG: '1000000',
       RATE_LIMIT_SIGNUP_PER_IP: '1000000',

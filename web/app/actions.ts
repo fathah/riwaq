@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { clearDashboardSession, createDashboardSession, requireDashboardSession, setSelectedOrganizationId } from '../lib/auth'
-import { connectTelegram, createAgent, createKnowledgeBase, createManagedOrganization, deleteKnowledgeDocument, disconnectAgentChannel, getManagedOrganizations, renameManagedOrganization, updateOrganizationLlm, uploadKnowledgeDocument } from '../lib/riwaq'
+import { connectTelegram, createAgent, createAgentMemory, createKnowledgeBase, createManagedOrganization, deleteAgentMemory, deleteKnowledgeDocument, disconnectAgentChannel, forgetAgentUser, getManagedOrganizations, renameManagedOrganization, updateAgentInstructions, updateAgentMemory, updateOrganizationLlm, uploadKnowledgeDocument } from '../lib/riwaq'
 
 function field(formData: FormData, name: string): string {
   return String(formData.get(name) ?? '').trim()
@@ -51,6 +51,92 @@ export async function createAgentAction(formData: FormData): Promise<void> {
   finish('/agents', 'notice', `Agent “${name}” created`)
 }
 
+export async function updateAgentInstructionsAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const agentId = field(formData, 'agentId')
+  const systemPrompt = field(formData, 'systemPrompt')
+  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  if (!agentId) finish('/agents', 'error', 'Agent is required')
+
+  try {
+    await updateAgentInstructions(agentId, systemPrompt)
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+  revalidatePath('/agents')
+  revalidatePath(path)
+  revalidatePath('/playground')
+  finish(path, 'notice', systemPrompt ? 'Agent instructions updated' : 'Custom instructions cleared')
+}
+
+function revalidateAgentMemory(agentId: string) {
+  revalidatePath(`/agents/${encodeURIComponent(agentId)}`)
+}
+
+export async function createAgentMemoryAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const agentId = field(formData, 'agentId')
+  const fact = field(formData, 'fact')
+  const scope = field(formData, 'scope')
+  const endUserId = field(formData, 'endUserId')
+  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  if (!agentId || !fact) finish(path, 'error', 'Agent and memory fact are required')
+  if (scope === 'user' && !endUserId) finish(path, 'error', 'End-user identity is required for user-specific memory')
+  try {
+    await createAgentMemory(agentId, { fact, endUserId: scope === 'user' ? endUserId : null })
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+  revalidateAgentMemory(agentId)
+  finish(path, 'notice', 'Memory added')
+}
+
+export async function updateAgentMemoryAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const agentId = field(formData, 'agentId')
+  const memoryId = field(formData, 'memoryId')
+  const fact = field(formData, 'fact')
+  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  if (!agentId || !memoryId || !fact) finish(path, 'error', 'Agent, memory, and fact are required')
+  try {
+    await updateAgentMemory(agentId, memoryId, fact)
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+  revalidateAgentMemory(agentId)
+  finish(path, 'notice', 'Memory updated')
+}
+
+export async function deleteAgentMemoryAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const agentId = field(formData, 'agentId')
+  const memoryId = field(formData, 'memoryId')
+  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  if (!agentId || !memoryId) finish(path, 'error', 'Agent and memory are required')
+  try {
+    await deleteAgentMemory(agentId, memoryId)
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+  revalidateAgentMemory(agentId)
+  finish(path, 'notice', 'Memory deleted')
+}
+
+export async function forgetAgentUserAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const agentId = field(formData, 'agentId')
+  const endUserId = field(formData, 'endUserId')
+  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  if (!agentId || !endUserId) finish(path, 'error', 'Agent and end-user identity are required')
+  try {
+    await forgetAgentUser(agentId, endUserId)
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+  revalidateAgentMemory(agentId)
+  finish(path, 'notice', `Forgot all memories for ${endUserId}`)
+}
+
 export async function connectTelegramAction(formData: FormData): Promise<void> {
   await requireDashboardSession()
   const agentId = field(formData, 'agentId')
@@ -74,14 +160,10 @@ export async function disconnectChannelAction(formData: FormData): Promise<void>
   const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
   if (!agentId || !channelId) finish('/agents', 'error', 'Channel is required')
   try {
-    const result = await disconnectAgentChannel(agentId, channelId)
+    await disconnectAgentChannel(agentId, channelId)
     revalidatePath('/agents')
     revalidatePath(path)
-    finish(
-      path,
-      'notice',
-      result.webhookRemoved ? 'Telegram bot disconnected' : 'Telegram bot removed locally; its token was already invalid',
-    )
+    finish(path, 'notice', 'Telegram bot disconnected')
   } catch (error) {
     finish(path, 'error', messageOf(error))
   }

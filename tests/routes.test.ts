@@ -82,6 +82,19 @@ describe('first-party agent listing', () => {
     expect(res.status).toBe(200)
     expect(res.json).toEqual(expect.arrayContaining([expect.objectContaining({ id: agentId, name: 'r' })]))
   })
+
+  it('updates and clears the agent system prompt', async () => {
+    const updated = await api('PATCH', `/agents/${agentId}`, key, {
+      systemPrompt: 'Answer in no more than 50 words.',
+    })
+    expect(updated.status).toBe(200)
+    expect(updated.json.systemPrompt).toBe('Answer in no more than 50 words.')
+    expect((await api('GET', `/agents/${agentId}`, key)).json.systemPrompt).toBe('Answer in no more than 50 words.')
+
+    const cleared = await api('PATCH', `/agents/${agentId}`, key, { systemPrompt: '' })
+    expect(cleared.status).toBe(200)
+    expect(cleared.json.systemPrompt).toBe('')
+  })
 })
 
 describe('knowledge document inspection', () => {

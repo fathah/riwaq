@@ -19,6 +19,10 @@ const createSchema = z.object({
   model: z.string().max(200).optional(),
 })
 
+const updateSchema = z.object({
+  systemPrompt: z.string().max(20_000),
+})
+
 // List the current organization's agents for first-party management surfaces.
 agentsRoute.get('/agents', async (c) => {
   const orgId = c.get('orgId')
@@ -88,4 +92,22 @@ agentsRoute.get('/agents/:id', async (c) => {
   }
 
   return c.json({ ...agent, knowledgeBases: kbs, effectiveLlm })
+})
+
+// Update operator-owned instructions without touching conversations or channel
+// connections. An empty string intentionally restores the base Riwaq prompt.
+agentsRoute.patch('/agents/:id', async (c) => {
+  const orgId = c.get('orgId')
+  const agent = await getAgentInOrg(c.req.param('id'), orgId)
+  if (!agent) return c.json({ error: 'agent not found' }, 404)
+
+  const parsed = updateSchema.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400)
+
+  const [updated] = await db
+    .update(agents)
+    .set({ systemPrompt: parsed.data.systemPrompt.trim() })
+    .where(eq(agents.id, agent.id))
+    .returning()
+  return c.json(updated!)
 })

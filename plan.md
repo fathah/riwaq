@@ -145,7 +145,7 @@ riwaq/
     │   ├── analytics.ts        # top-questions + learning report
     │   ├── learning.ts         # learned-answer candidates: list / approve / reject
     │   ├── reminders.ts        # schedule / list / cancel / deliveries
-    │   └── channels.ts         # messaging connection management + provider webhooks
+    │   └── channels.ts         # messaging connection management + polling intake
     ├── serializers.ts          # canonical ChatResult → native | openai (+ stream frames)
     ├── services/
     │   ├── chat.ts             # prepare / run / stream (canonical, prepared-turn split)
@@ -207,9 +207,8 @@ riwaq/
 |--------|------|--------------|
 | GET | `/channels` | List organization connections; credentials are never returned |
 | GET | `/agents/:id/channels` | List one agent's connections |
-| POST | `/agents/:id/channels/telegram` | `{ token }` → verify bot + register secret webhook |
-| DELETE | `/agents/:id/channels/:channelId` | Remove provider webhook and local credentials |
-| POST | `/webhooks/telegram/:channelId` | Secret-header authenticated and deduplicated Telegram delivery |
+| POST | `/agents/:id/channels/telegram` | `{ token }` → verify bot + start outbound polling |
+| DELETE | `/agents/:id/channels/:channelId` | Stop polling and remove local credentials |
 
 **OpenAI-compatible (inbound)**
 | Method | Path | Body / Notes | Returns |

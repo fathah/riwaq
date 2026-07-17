@@ -333,6 +333,21 @@ pre { overflow-x: auto; margin: 0; border: 1px solid #25362e; border-radius: 11p
 .agent-knowledge-section { margin-top: 26px; }
 .agent-knowledge-section > header { margin-bottom: 12px; }
 .agent-knowledge-section .row-open { margin-left: auto; }
+.agent-memory-section { display: grid; gap: 12px; margin-top: 26px; }
+.section-action-header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 2px; }
+.section-action-header h3 { margin: 5px 0 6px; font-size: 18px; }
+.section-action-header p { max-width: 660px; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.memory-scope { display: grid; gap: 8px; }
+.memory-scope > header { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 18px; padding: 0 2px; }
+.memory-scope > header > div { display: flex; align-items: baseline; gap: 9px; }
+.memory-scope > header strong { font-size: 11px; }
+.memory-scope > header span { color: var(--muted); font-size: 9px; }
+.memory-scope > header .button { min-height: 32px; padding: 6px 10px; font-size: 9px; }
+.memory-row { min-height: 72px; }
+.memory-row .row-copy strong { overflow: visible; white-space: normal; line-height: 1.5; }
+.memory-row-actions { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+.memory-row-actions .button { min-height: 34px; padding: 7px 10px; font-size: 9px; }
+.memory-limit-note { margin: 0; color: var(--muted); font-size: 9px; }
 .secret-result > code { overflow-wrap: anywhere; border: 1px solid #cfe4da; border-radius: 11px; color: #174b37; background: #f1faf6; padding: 15px; font-size: 11px; line-height: 1.6; }
 .secret-success { display: flex; align-items: flex-start; gap: 12px; }
 .secret-success > span { display: grid; flex: 0 0 auto; width: 28px; height: 28px; place-items: center; border-radius: 99px; color: white; background: var(--green); font-weight: 900; }
@@ -395,6 +410,10 @@ pre { overflow-x: auto; margin: 0; border: 1px solid #25362e; border-radius: 11p
   .playground-agent-meta { display: none; }
   .starter-grid { grid-template-columns: 1fr; }
   .agent-detail-grid { grid-template-columns: 1fr; }
+  .section-action-header { align-items: stretch; flex-direction: column; }
+  .section-action-header > .button { width: 100%; }
+  .memory-row { align-items: flex-start; flex-wrap: wrap; }
+  .memory-row-actions { width: 100%; margin-left: 43px; }
 }
 
 @media (max-width: 600px) {

@@ -92,8 +92,8 @@ export async function enqueueLearn(p: LearnPayload): Promise<void> {
   })
 }
 
-/** Acknowledge provider webhooks quickly, then run the canonical chat pipeline in
- * a durable worker. The DB event makes retries idempotent. */
+/** Run messaging updates through the canonical chat pipeline in a durable worker.
+ * The DB event makes polling replays and worker retries idempotent. */
 export async function enqueueChannelEvent(p: ChannelEventPayload): Promise<void> {
   if (!redisEnabled) {
     void processQueuedChannelEvent(p.eventId).catch((err) =>

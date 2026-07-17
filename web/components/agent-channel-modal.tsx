@@ -24,7 +24,7 @@ export function AgentChannelModal({ agent, channel }: { agent: Agent; channel?: 
         <form action={disconnectChannelAction} className="modal-form channel-disconnect-form">
           <input name="agentId" type="hidden" value={agent.id} />
           <input name="channelId" type="hidden" value={channel.id} />
-          <footer className="modal-actions"><span>This removes Riwaq’s webhook and forgets the bot token.</span><Submit label="Disconnect" pendingLabel="Disconnecting…" /></footer>
+          <footer className="modal-actions"><span>This stops polling and forgets the bot token.</span><Submit label="Disconnect" pendingLabel="Disconnecting…" /></footer>
         </form>
       </Modal>
     )
@@ -44,7 +44,7 @@ export function AgentChannelModal({ agent, channel }: { agent: Agent; channel?: 
           <input name="token" type="password" required autoComplete="new-password" placeholder="123456789:AA…" />
           <small>The token stays on the Riwaq server and is encrypted at rest in production.</small>
         </label>
-        <footer className="modal-actions"><span>Telegram requires RIWAQ_PUBLIC_API_URL to be a public HTTPS address.</span><Submit label="Connect bot" pendingLabel="Connecting…" /></footer>
+        <footer className="modal-actions"><span>Works from localhost or Docker—no public URL required.</span><Submit label="Connect bot" pendingLabel="Connecting…" /></footer>
       </form>
     </Modal>
   )

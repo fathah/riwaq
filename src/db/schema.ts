@@ -151,7 +151,9 @@ export const agentChannels = pgTable(
     externalUsername: text('external_username'),
     credential: text('credential').notNull(),
     credentialEncrypted: boolean('credential_encrypted').notNull().default(false),
-    webhookSecretHash: text('webhook_secret_hash').notNull(),
+    // Legacy webhook installs populated this value. Polling-only connections do
+    // not need an inbound secret, so new rows leave it null.
+    webhookSecretHash: text('webhook_secret_hash'),
     status: text('status').notNull().default('connecting'), // connecting | active | error
     lastError: text('last_error'),
     lastReceivedAt: timestamp('last_received_at', { withTimezone: true }),
@@ -188,8 +190,8 @@ export const channelSessions = pgTable(
   ],
 )
 
-// Telegram retries webhook deliveries. Provider event IDs make intake
-// idempotent; responseText + sentPartCount let a retried worker resume delivery
+// Telegram updates may be replayed after reconnects. Provider event IDs make
+// intake idempotent; responseText + sentPartCount let a retried worker resume delivery
 // without running the agent twice or repeating already-sent message parts.
 export const channelEvents = pgTable(
   'channel_events',

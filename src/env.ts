@@ -81,10 +81,13 @@ const schema = z.object({
   MAX_BODY_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 
-  // Public HTTPS origin used when registering messaging-provider webhooks.
-  // Optional until an operator connects a channel.
-  RIWAQ_PUBLIC_API_URL: z.string().default(''),
   TELEGRAM_API_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  // Telegram uses outbound long polling, so local/private deployments need no
+  // public URL. Disable only on API replicas that must not own polling work.
+  TELEGRAM_POLLING_ENABLED: z
+    .enum(['0', '1', 'true', 'false'])
+    .default('1')
+    .transform((v) => v === '1' || v === 'true'),
 
   // --- Retrieval tuning ---
   // Drop retrieved chunks below this cosine similarity (0..1). 0 = keep all.
