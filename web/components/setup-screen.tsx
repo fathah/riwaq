@@ -11,7 +11,7 @@ export function SetupScreen({ issues, apiUrl, connectionError = false }: SetupSc
   return (
     <main className="setup-shell">
       <header className="setup-header">
-        <div className="brand-lockup"><span className="brand-mark">R</span><div><strong>Riwaq</strong><span>Console</span></div></div>
+        <div className="brand-lockup"><img alt="" aria-hidden="true" className="brand-mark brand-logo" height="38" src="/riwaq-icon.svg" width="38" /><div><strong>Riwaq</strong><span>Console</span></div></div>
         <span className="setup-step">First-run setup</span>
       </header>
 

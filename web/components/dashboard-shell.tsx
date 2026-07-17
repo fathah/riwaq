@@ -34,7 +34,7 @@ export function DashboardShell({ organization, organizations, ready, apiUrl, chi
   return (
     <main className="dashboard-shell">
       <aside className="sidebar">
-        <Link className="brand-lockup brand-link" href="/overview"><span className="brand-mark">R</span><div><strong>Riwaq</strong><span>Console</span></div></Link>
+        <Link className="brand-lockup brand-link" href="/overview"><img alt="" aria-hidden="true" className="brand-mark brand-logo" height="38" src="/riwaq-icon.svg" width="38" /><div><strong>Riwaq</strong><span>Console</span></div></Link>
         <nav aria-label="Primary navigation">
           {navigation.map((item) => <Link className={pathname === item.href ? 'nav-active' : ''} href={item.href} key={item.href}><Icon name={item.icon} />{item.label}</Link>)}
         </nav>

@@ -70,6 +70,7 @@ extract memory, classify topic, update counters) runs *after* the response is se
 | 4 | **LLM** | Prompt = system + long-term memory + retrieved chunks + recent history + user message → Claude |
 | 5 | **Output** | `{ answer, citations[], conversationId }` (citations name the source KB + document) |
 | 6 | **Learning loop** | Persist messages + used chunks; extract memory; classify topic + counters; feedback / KB-gap flags |
+| 7 | **Channels** | Normalize Telegram and future providers into the same agent chat, memory, analytics, and learning pipeline |
 
 ---
 
@@ -143,7 +144,8 @@ riwaq/
     │   ├── feedback.ts         # up-vote feeds self-learning
     │   ├── analytics.ts        # top-questions + learning report
     │   ├── learning.ts         # learned-answer candidates: list / approve / reject
-    │   └── reminders.ts        # schedule / list / cancel / deliveries
+    │   ├── reminders.ts        # schedule / list / cancel / deliveries
+    │   └── channels.ts         # messaging connection management + provider webhooks
     ├── serializers.ts          # canonical ChatResult → native | openai (+ stream frames)
     ├── services/
     │   ├── chat.ts             # prepare / run / stream (canonical, prepared-turn split)
@@ -155,6 +157,7 @@ riwaq/
     │   ├── learn.ts            # async loop: memory + topics + gap signal + reminder extract
     │   ├── learning.ts         # self-learning: endorse → cluster → promote → report
     │   ├── reminders.ts        # CRUD + scheduler tick (claim/fire/deliver) + auto-extract
+    │   ├── channels.ts         # channel sessions/events + canonical chat dispatch
     │   └── usage.ts            # persistent token/spend/storage governance
     └── prompts/
         ├── system.ts
@@ -198,6 +201,15 @@ riwaq/
 | POST | `/messages/:id/feedback` | `{ rating: "up" \| "down" }` | `{ ok }` |
 | GET | `/agents/:id/analytics/top-questions` | per-agent | `[{ label, count, lastSeen }]` |
 | GET | `/health` | DB ping | `{ ok }` |
+
+**Messaging channels**
+| Method | Path | Body / Notes |
+|--------|------|--------------|
+| GET | `/channels` | List organization connections; credentials are never returned |
+| GET | `/agents/:id/channels` | List one agent's connections |
+| POST | `/agents/:id/channels/telegram` | `{ token }` → verify bot + register secret webhook |
+| DELETE | `/agents/:id/channels/:channelId` | Remove provider webhook and local credentials |
+| POST | `/webhooks/telegram/:channelId` | Secret-header authenticated and deduplicated Telegram delivery |
 
 **OpenAI-compatible (inbound)**
 | Method | Path | Body / Notes | Returns |

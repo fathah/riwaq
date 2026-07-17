@@ -35,6 +35,27 @@ export type Agent = {
   createdAt: string
 }
 
+export type AgentDetail = Agent & {
+  knowledgeBases: Array<Pick<KnowledgeBase, 'id' | 'name' | 'isDefault'>>
+  effectiveLlm: {
+    provider: string
+    model: string
+    baseURL?: string
+  }
+}
+
+export type AgentChannel = {
+  id: string
+  agentId: string
+  provider: 'telegram' | string
+  displayName: string
+  externalUsername: string | null
+  status: 'connecting' | 'active' | 'error'
+  lastError: string | null
+  lastReceivedAt: string | null
+  createdAt: string
+}
+
 export type KnowledgeBase = {
   id: string
   name: string
@@ -186,6 +207,18 @@ export function getAgents() {
   return request<Agent[]>('/agents?limit=200')
 }
 
+export function getAgent(agentId: string) {
+  return request<AgentDetail>(`/agents/${encodeURIComponent(agentId)}`)
+}
+
+export function getChannels() {
+  return request<AgentChannel[]>('/channels')
+}
+
+export function getAgentChannels(agentId: string) {
+  return request<AgentChannel[]>(`/agents/${encodeURIComponent(agentId)}/channels`)
+}
+
 export function getKnowledgeBases() {
   return request<KnowledgeBase[]>('/knowledge-bases?limit=200')
 }
@@ -226,6 +259,21 @@ export async function chatWithAgent(agentId: string, input: { message: string; c
 
 export function createAgent(input: { name: string; systemPrompt?: string; provider?: string; model?: string }) {
   return request('/agents', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export function connectTelegram(agentId: string, token: string) {
+  return request<AgentChannel>(`/agents/${encodeURIComponent(agentId)}/channels/telegram`, {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+    signal: AbortSignal.timeout(20_000),
+  })
+}
+
+export function disconnectAgentChannel(agentId: string, channelId: string) {
+  return request<{ ok: true; webhookRemoved: boolean }>(
+    `/agents/${encodeURIComponent(agentId)}/channels/${encodeURIComponent(channelId)}`,
+    { method: 'DELETE', signal: AbortSignal.timeout(20_000) },
+  )
 }
 
 export function createKnowledgeBase(name: string) {

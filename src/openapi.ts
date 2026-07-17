@@ -19,7 +19,7 @@ export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Riwaq API',
-    version: '1.2.0',
+    version: '1.3.0',
     description:
       'Multi-tenant AI agent infrastructure: RAG + per-agent memory + question analytics, ' +
       'a per-org self-learning loop, scheduled reminders with signed webhooks, and an ' +
@@ -36,6 +36,7 @@ export const openApiDocument = {
     { name: 'Analytics' },
     { name: 'Self-learning' },
     { name: 'Reminders' },
+    { name: 'Channels' },
     { name: 'Ops' },
   ],
   components: {
@@ -201,6 +202,20 @@ export const openApiDocument = {
           firedAt: { type: 'string', format: 'date-time' },
         },
       },
+      AgentChannel: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          agentId: { type: 'string', format: 'uuid' },
+          provider: { type: 'string', enum: ['telegram'] },
+          displayName: { type: 'string' },
+          externalUsername: { type: ['string', 'null'] },
+          status: { type: 'string', enum: ['connecting', 'active', 'error'] },
+          lastError: { type: ['string', 'null'] },
+          lastReceivedAt: { type: ['string', 'null'], format: 'date-time' },
+          createdAt: { type: 'string', format: 'date-time' },
+        },
+      },
     },
   },
   paths: {
@@ -298,6 +313,30 @@ export const openApiDocument = {
     },
     '/agents/{id}': {
       get: { tags: ['Agents'], summary: 'Agent + linked KBs + effectiveLlm', security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '200': { description: 'Agent' }, '404': { description: 'Not found' } } },
+    },
+
+    // --- Messaging channels ---
+    '/channels': {
+      get: { tags: ['Channels'], summary: "List the organization's messaging connections (credentials omitted)", security: [{ orgApiKey: [] }], responses: { '200': { description: 'Channels', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/AgentChannel' } } } } } } },
+    },
+    '/agents/{id}/channels': {
+      get: { tags: ['Channels'], summary: "List an agent's messaging connections", security: [{ orgApiKey: [] }], parameters: [agentIdParam], responses: { '200': { description: 'Channels' }, '404': { description: 'Agent not found' } } },
+    },
+    '/agents/{id}/channels/telegram': {
+      post: {
+        tags: ['Channels'],
+        summary: 'Verify a Telegram bot token and register its Riwaq webhook',
+        security: [{ orgApiKey: [] }],
+        parameters: [agentIdParam],
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['token'], properties: { token: { type: 'string', writeOnly: true } } } } } },
+        responses: { '201': { description: 'Connected; token omitted from response' }, '400': { description: 'Invalid token or public URL' }, '409': { description: 'Agent or bot is already connected' }, '502': { description: 'Telegram webhook registration failed' } },
+      },
+    },
+    '/agents/{id}/channels/{channelId}': {
+      delete: { tags: ['Channels'], summary: 'Remove a messaging connection and its provider webhook', security: [{ orgApiKey: [] }], parameters: [agentIdParam, { name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Disconnected' }, '404': { description: 'Channel not found' } } },
+    },
+    '/webhooks/telegram/{channelId}': {
+      post: { tags: ['Channels'], summary: 'Telegram delivery endpoint (authenticated with Telegram secret-token header)', parameters: [{ name: 'channelId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Accepted or already received' }, '404': { description: 'Unknown connection or invalid secret' } } },
     },
 
     // --- Knowledge bases + documents ---

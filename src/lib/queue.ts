@@ -10,9 +10,17 @@ import { processLearn, type LearnPayload } from '../services/learn'
 // in-process fire-and-forget path, so nothing is required to run the app.
 
 export type IngestPayload = { documentId: string; knowledgeBaseId: string; text: string }
+export type ChannelEventPayload = { eventId: string }
+
+async function processQueuedChannelEvent(eventId: string): Promise<void> {
+  // Loaded lazily to avoid queue → channels → chat → queue initialization cycles.
+  const { processChannelEvent } = await import('../services/channels')
+  await processChannelEvent(eventId)
+}
 
 const INGEST = 'ingest'
 const LEARN = 'learn'
+const CHANNEL = 'channel'
 
 // Give BullMQ a connection-options object (parsed from REDIS_URL) rather than an
 // ioredis instance — BullMQ manages its own connection (and the required
@@ -31,6 +39,7 @@ function bullConnection() {
 
 let ingestQueue: Queue | null = null
 let learnQueue: Queue | null = null
+let channelQueue: Queue | null = null
 let workers: Worker[] = []
 
 function getIngestQueue(): Queue {
@@ -40,6 +49,10 @@ function getIngestQueue(): Queue {
 function getLearnQueue(): Queue {
   if (!learnQueue) learnQueue = new Queue(LEARN, { connection: bullConnection() })
   return learnQueue
+}
+function getChannelQueue(): Queue {
+  if (!channelQueue) channelQueue = new Queue(CHANNEL, { connection: bullConnection() })
+  return channelQueue
 }
 
 /** Enqueue ingestion (durable) or run it in-process when no queue is configured. */
@@ -79,6 +92,24 @@ export async function enqueueLearn(p: LearnPayload): Promise<void> {
   })
 }
 
+/** Acknowledge provider webhooks quickly, then run the canonical chat pipeline in
+ * a durable worker. The DB event makes retries idempotent. */
+export async function enqueueChannelEvent(p: ChannelEventPayload): Promise<void> {
+  if (!redisEnabled) {
+    void processQueuedChannelEvent(p.eventId).catch((err) =>
+      console.error('[channel] in-process event failed', p.eventId, err instanceof Error ? err.message : err),
+    )
+    return
+  }
+  await getChannelQueue().add(CHANNEL, p, {
+    jobId: `channel-${p.eventId}`,
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: true,
+    removeOnFail: 500,
+  })
+}
+
 /** Start BullMQ workers (no-op without Redis). Call once at boot. */
 export function startWorkers(): void {
   if (!redisEnabled) return
@@ -105,19 +136,31 @@ export function startWorkers(): void {
   })
   learnWorker.on('failed', (job, err) => console.error('[queue] learn failed:', err?.message, job?.id))
 
-  workers = [ingestWorker, learnWorker]
-  console.log('[queue] durable workers started (ingest, learn)')
+  const channelWorker = new Worker(
+    CHANNEL,
+    async (job: Job) => processQueuedChannelEvent((job.data as ChannelEventPayload).eventId),
+    { connection: bullConnection() },
+  )
+  channelWorker.on('failed', (job, err) => console.error('[queue] channel failed:', err?.message, job?.id))
+
+  workers = [ingestWorker, learnWorker, channelWorker]
+  console.log('[queue] durable workers started (ingest, learn, channel)')
 }
 
 export async function closeQueues(): Promise<void> {
   await Promise.all(workers.map((w) => w.close())).catch(() => {})
   await ingestQueue?.close().catch(() => {})
   await learnQueue?.close().catch(() => {})
+  await channelQueue?.close().catch(() => {})
 }
 
 export async function queueMetrics(): Promise<Record<string, number>> {
   if (!redisEnabled) return { enabled: 0 }
-  const [ingest, learn] = await Promise.all([getIngestQueue().getJobCounts(), getLearnQueue().getJobCounts()])
+  const [ingest, learn, channel] = await Promise.all([
+    getIngestQueue().getJobCounts(),
+    getLearnQueue().getJobCounts(),
+    getChannelQueue().getJobCounts(),
+  ])
   return {
     enabled: 1,
     ingest_waiting: ingest.waiting ?? 0,
@@ -126,5 +169,8 @@ export async function queueMetrics(): Promise<Record<string, number>> {
     learn_waiting: learn.waiting ?? 0,
     learn_active: learn.active ?? 0,
     learn_failed: learn.failed ?? 0,
+    channel_waiting: channel.waiting ?? 0,
+    channel_active: channel.active ?? 0,
+    channel_failed: channel.failed ?? 0,
   }
 }

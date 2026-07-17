@@ -3,7 +3,7 @@
 </p>
 
 Multi-tenant AI agent infrastructure. **RAG + per-agent memory + question analytics +
-a per-org self-learning loop + scheduled reminders**. One backend hosts many
+a per-org self-learning loop + scheduled reminders + messaging channels**. One backend hosts many
 organizations, each with many independent agents. Every agent has its own private
 knowledge base and can optionally **share** knowledge bases with other agents in the
 same org.
@@ -16,6 +16,8 @@ Provider-agnostic on both sides:
   also speaks **OpenAI** (`/v1/chat/completions`, or `?format=openai`). The output shape
   is identical no matter which provider backs the agent, and stays stable as new
   backends/formats are added.
+- **Channels** — connect a Telegram bot to any agent. Telegram uses the same RAG,
+  per-user memory, analytics, quotas, and learning pipeline as the API and Playground.
 
 Docker-first, API-first.
 
@@ -46,6 +48,27 @@ Two features build on those signals:
 - **Reminders** — agents remember dates (renewals, deadlines) and fire a **signed webhook**
   to your backend at due time; reminders can be created via API or auto-extracted from
   chat. See [Reminders](#reminders).
+
+### Telegram bots
+
+Set `RIWAQ_PUBLIC_API_URL` to the API's externally reachable HTTPS origin, restart
+Riwaq, then open **Agents → Connect Telegram** in the console. Create a bot with
+`@BotFather`, paste its raw token, and Riwaq verifies the bot and registers a secret-
+protected webhook automatically.
+
+Every Telegram message enters the canonical agent chat service, so answers and
+learning stay consistent with the Playground and HTTP API. End-user memory remains
+safe: Telegram users are scoped as `telegram:<user-id>`, and group participants do
+not share conversation history. `/new` starts a fresh conversation.
+
+```env
+RIWAQ_PUBLIC_API_URL=https://riwaq.example.com
+```
+
+The bot token is never returned by the API and is encrypted at rest when
+`SECRET_ENCRYPTION_KEY` is configured. Webhook deliveries are deduplicated before
+being handed to the durable channel worker. WhatsApp and other providers can be
+added as adapters over the same `agent_channels` and canonical chat layer.
 
 **Isolation by default, sharing by opt-in:**
 

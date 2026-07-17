@@ -11,7 +11,7 @@ describe('OpenAPI contract', () => {
       paths: Record<string, unknown>
     }
     expect(spec.openapi).toBe('3.1.0')
-    expect(spec.info.version).toBe('1.2.0')
+    expect(spec.info.version).toBe('1.3.0')
 
     // Chat surfaces (native + OpenAI-compatible).
     expect(spec.paths['/agents/{id}/chat']).toBeDefined()
@@ -20,7 +20,7 @@ describe('OpenAPI contract', () => {
     expect(spec.paths['/admin/organizations']).toBeDefined()
     expect(spec.paths['/admin/organizations/{id}']).toBeDefined()
 
-    // Self-learning + reminders must be documented.
+    // Self-learning, reminders, and messaging channels must be documented.
     for (const path of [
       '/organizations/learning',
       '/organizations/webhook',
@@ -28,6 +28,9 @@ describe('OpenAPI contract', () => {
       '/agents/{id}/learned-answers',
       '/agents/{id}/reminders',
       '/agents/{id}/reminders/{rid}',
+      '/channels',
+      '/agents/{id}/channels/telegram',
+      '/webhooks/telegram/{channelId}',
     ]) {
       expect(spec.paths[path], `missing ${path}`).toBeDefined()
     }

@@ -5,7 +5,7 @@ export function LoginScreen({ error, apiUrl }: { error?: string; apiUrl: string 
     <main className="center-shell">
       <section className="auth-card">
         <div className="brand-lockup">
-          <span className="brand-mark">R</span>
+          <img alt="" aria-hidden="true" className="brand-mark brand-logo" height="38" src="/riwaq-icon.svg" width="38" />
           <div><strong>Riwaq</strong><span>Console</span></div>
         </div>
         <div className="auth-copy">

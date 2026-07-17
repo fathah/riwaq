@@ -81,6 +81,11 @@ const schema = z.object({
   MAX_BODY_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 
+  // Public HTTPS origin used when registering messaging-provider webhooks.
+  // Optional until an operator connects a channel.
+  RIWAQ_PUBLIC_API_URL: z.string().default(''),
+  TELEGRAM_API_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+
   // --- Retrieval tuning ---
   // Drop retrieved chunks below this cosine similarity (0..1). 0 = keep all.
   // A small floor stops clearly-irrelevant chunks being surfaced as "citations"

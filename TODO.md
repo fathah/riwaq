@@ -33,6 +33,19 @@ automated tests, production configuration, and operator documentation agree.
 - [x] Backup/restore and credential-rotation runbooks
 - [x] CI release gate: typecheck, tests, audit, Compose validation, image build
 - [x] Protected Next.js management console with first-run setup, organization switching, and an agent Playground
+- [x] Provider-neutral messaging-channel layer with per-agent Telegram bot connections
+- [ ] Add WhatsApp and additional messaging adapters over the canonical channel pipeline
+
+## Future roadmap — desktop app (deferred)
+
+- [ ] Re-evaluate a lightweight, self-contained desktop edition after the server edition stabilizes
+  - Prefer Tauri with a React/Vite static interface
+  - Start with the existing TypeScript backend packaged as a Node sidecar
+  - Replace external PostgreSQL/pgvector with embedded PGlite + pgvector
+  - Replace Redis/Dragonfly requirements with a persistent embedded job queue
+  - Bundle models and store provider credentials using OS-protected storage
+  - Ship signed macOS and Windows installers that require no Node.js, Docker, or developer tools
+  - Move backend components to Rust only when profiling demonstrates a worthwhile benefit
 
 ## A+ exit criteria
 

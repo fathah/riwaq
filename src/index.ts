@@ -5,7 +5,7 @@ import { env } from './env'
 import { migrate } from './db/migrate'
 import { sql } from './db/client'
 import { recoverStuckIngestions } from './services/ingest'
-import { encryptLegacyLlmSecrets } from './services/secrets'
+import { encryptLegacyChannelSecrets, encryptLegacyLlmSecrets } from './services/secrets'
 import { startWorkers, closeQueues, queueMetrics } from './lib/queue'
 import { closeRedis, redisEnabled } from './lib/redis'
 import type { AppEnv } from './types'
@@ -24,6 +24,7 @@ import { operations, operationalMetrics } from './middleware/operations'
 import { getRedis } from './lib/redis'
 import { openApiDocument } from './openapi'
 import { ChatError } from './services/chat'
+import { channelsRoute, channelWebhooksRoute } from './routes/channels'
 
 export const app = new Hono<AppEnv>()
 
@@ -75,6 +76,9 @@ app.get('/metrics', async (c) => {
 
 // Each sub-app applies org-auth internally (except the public POST /organizations).
 // All are mounted at root and declare absolute paths.
+// Provider webhooks must be mounted before org-auth wildcard middleware from the
+// protected sub-apps; they authenticate with provider-specific secret headers.
+app.route('/', channelWebhooksRoute)
 app.route('/', organizationsRoute)
 app.route('/', agentsRoute)
 app.route('/', knowledgeBasesRoute)
@@ -85,6 +89,7 @@ app.route('/', feedbackRoute)
 app.route('/', analyticsRoute)
 app.route('/', learningRoute)
 app.route('/', remindersRoute)
+app.route('/', channelsRoute)
 
 // Map a thrown error to an HTTP status. ChatError carries its own; provider SDK
 // errors expose a numeric `status`; a Postgres UUID cast error is a client 400;
@@ -104,7 +109,7 @@ function errorMessage(err: unknown): string {
 
 async function main() {
   await migrate()
-  const encryptedSecrets = await encryptLegacyLlmSecrets()
+  const encryptedSecrets = await encryptLegacyLlmSecrets() + await encryptLegacyChannelSecrets()
   if (encryptedSecrets > 0) {
     console.log(`[riwaq] encrypted ${encryptedSecrets} legacy LLM credential(s)`)
   }

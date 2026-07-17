@@ -10,6 +10,8 @@ import {
   timestamp,
   vector,
   primaryKey,
+  uniqueIndex,
+  index,
 } from 'drizzle-orm/pg-core'
 import { env } from '../env'
 
@@ -133,6 +135,83 @@ export const messages = pgTable('messages', {
   tokens: integer('tokens').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
+
+// Reusable inbound/outbound messaging connections. Telegram is the first
+// provider; future adapters (WhatsApp, Messenger, etc.) attach to the same agent
+// and canonical chat pipeline without adding provider-specific columns.
+export const agentChannels = pgTable(
+  'agent_channels',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    agentId: uuid('agent_id').notNull(),
+    provider: text('provider').notNull(), // telegram | whatsapp | ...
+    displayName: text('display_name').notNull(),
+    externalId: text('external_id').notNull(),
+    externalUsername: text('external_username'),
+    credential: text('credential').notNull(),
+    credentialEncrypted: boolean('credential_encrypted').notNull().default(false),
+    webhookSecretHash: text('webhook_secret_hash').notNull(),
+    status: text('status').notNull().default('connecting'), // connecting | active | error
+    lastError: text('last_error'),
+    lastReceivedAt: timestamp('last_received_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_agent_channels_agent_provider').on(t.agentId, t.provider),
+    uniqueIndex('uq_agent_channels_provider_external').on(t.provider, t.externalId),
+    index('idx_agent_channels_org').on(t.orgId),
+  ],
+)
+
+// Maps a provider chat/user pair to one canonical Riwaq conversation. Including
+// the external user prevents participants in a group chat from sharing history.
+export const channelSessions = pgTable(
+  'channel_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => agentChannels.id, { onDelete: 'cascade' }),
+    externalChatId: text('external_chat_id').notNull(),
+    externalUserId: text('external_user_id').notNull(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('uq_channel_sessions_identity').on(t.channelId, t.externalChatId, t.externalUserId),
+    uniqueIndex('uq_channel_sessions_conversation').on(t.conversationId),
+  ],
+)
+
+// Telegram retries webhook deliveries. Provider event IDs make intake
+// idempotent; responseText + sentPartCount let a retried worker resume delivery
+// without running the agent twice or repeating already-sent message parts.
+export const channelEvents = pgTable(
+  'channel_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => agentChannels.id, { onDelete: 'cascade' }),
+    providerEventId: text('provider_event_id').notNull(),
+    payload: jsonb('payload').notNull(),
+    status: text('status').notNull().default('pending'), // pending | processing | responding | processed | error
+    responseText: text('response_text'),
+    sentPartCount: integer('sent_part_count').notNull().default(0),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('uq_channel_events_provider_id').on(t.channelId, t.providerEventId),
+    index('idx_channel_events_status').on(t.status, t.createdAt),
+  ],
+)
 
 export const memories = pgTable('memories', {
   id: uuid('id').primaryKey().defaultRandom(),

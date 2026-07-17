@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { clearDashboardSession, createDashboardSession, requireDashboardSession, setSelectedOrganizationId } from '../lib/auth'
-import { createAgent, createKnowledgeBase, createManagedOrganization, deleteKnowledgeDocument, getManagedOrganizations, renameManagedOrganization, updateOrganizationLlm, uploadKnowledgeDocument } from '../lib/riwaq'
+import { connectTelegram, createAgent, createKnowledgeBase, createManagedOrganization, deleteKnowledgeDocument, disconnectAgentChannel, getManagedOrganizations, renameManagedOrganization, updateOrganizationLlm, uploadKnowledgeDocument } from '../lib/riwaq'
 
 function field(formData: FormData, name: string): string {
   return String(formData.get(name) ?? '').trim()
@@ -49,6 +49,42 @@ export async function createAgentAction(formData: FormData): Promise<void> {
   revalidatePath('/agents')
   revalidatePath('/overview')
   finish('/agents', 'notice', `Agent “${name}” created`)
+}
+
+export async function connectTelegramAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const agentId = field(formData, 'agentId')
+  const token = field(formData, 'token')
+  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  if (!agentId || !token) finish('/agents', 'error', 'Agent and Telegram bot token are required')
+  try {
+    const channel = await connectTelegram(agentId, token)
+    revalidatePath('/agents')
+    revalidatePath(path)
+    finish(path, 'notice', `Telegram bot ${channel.externalUsername ? `@${channel.externalUsername}` : channel.displayName} connected`)
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
+}
+
+export async function disconnectChannelAction(formData: FormData): Promise<void> {
+  await requireDashboardSession()
+  const agentId = field(formData, 'agentId')
+  const channelId = field(formData, 'channelId')
+  const path = agentId ? `/agents/${encodeURIComponent(agentId)}` : '/agents'
+  if (!agentId || !channelId) finish('/agents', 'error', 'Channel is required')
+  try {
+    const result = await disconnectAgentChannel(agentId, channelId)
+    revalidatePath('/agents')
+    revalidatePath(path)
+    finish(
+      path,
+      'notice',
+      result.webhookRemoved ? 'Telegram bot disconnected' : 'Telegram bot removed locally; its token was already invalid',
+    )
+  } catch (error) {
+    finish(path, 'error', messageOf(error))
+  }
 }
 
 export async function createKnowledgeBaseAction(formData: FormData): Promise<void> {

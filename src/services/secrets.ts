@@ -1,6 +1,6 @@
 import { and, eq, isNotNull } from 'drizzle-orm'
 import { db } from '../db/client'
-import { organizations } from '../db/schema'
+import { agentChannels, organizations } from '../db/schema'
 import { encryptSecret, encryptionEnabled } from '../lib/crypto'
 
 /**
@@ -23,6 +23,27 @@ export async function encryptLegacyLlmSecrets(): Promise<number> {
       .set({ llmApiKey: encryptSecret(row.apiKey), llmApiKeyEncrypted: true })
       .where(and(eq(organizations.id, row.id), eq(organizations.llmApiKeyEncrypted, false)))
       .returning({ id: organizations.id })
+    migrated += updated.length
+  }
+  return migrated
+}
+
+/** Seal channel credentials that were created in development before an
+ * encryption key was configured. Production never leaves a bot token plaintext. */
+export async function encryptLegacyChannelSecrets(): Promise<number> {
+  if (!encryptionEnabled()) return 0
+  const rows = await db
+    .select({ id: agentChannels.id, credential: agentChannels.credential })
+    .from(agentChannels)
+    .where(eq(agentChannels.credentialEncrypted, false))
+
+  let migrated = 0
+  for (const row of rows) {
+    const updated = await db
+      .update(agentChannels)
+      .set({ credential: encryptSecret(row.credential), credentialEncrypted: true, updatedAt: new Date() })
+      .where(and(eq(agentChannels.id, row.id), eq(agentChannels.credentialEncrypted, false)))
+      .returning({ id: agentChannels.id })
     migrated += updated.length
   }
   return migrated
